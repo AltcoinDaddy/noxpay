@@ -25,19 +25,19 @@ export function PublicStats() {
     query: { enabled: hasContractConfig },
   });
 
-  // Demo values when contract isn't deployed
+  // Real values or zero fallback when contract isn't deployed
   const totalDistributed = statsData
     ? Number(formatUnits(statsData[0] as bigint, decimals)).toLocaleString(undefined, {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
       })
-    : '142,500.00';
+    : '0.00';
   const paymentCount = statsData
     ? Number(statsData[1]).toLocaleString()
-    : '47';
+    : '0';
   const uniqueRecipients = statsData
     ? Number(statsData[2]).toLocaleString()
-    : '12';
+    : '0';
 
   const isTreasury = Boolean(
     address && treasuryAddress && address.toLowerCase() === treasuryAddress.toLowerCase()

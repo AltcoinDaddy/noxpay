@@ -4,8 +4,42 @@ import {
   Shield, Lock, Eye, EyeOff, ArrowRight,
   Users, BarChart3, KeyRound
 } from 'lucide-react';
+import { useAccount, useReadContract } from 'wagmi';
+import { CONTRACTS, NOXPAY_ABI, ZERO_ADDRESS } from '../config/contracts';
+import { formatUnits } from 'viem';
+import { useTokenMetadata } from '../hooks/useTokenMetadata';
 
 export function LandingHero() {
+  const { address } = useAccount();
+  const { decimals, symbol } = useTokenMetadata();
+  const hasContractConfig = CONTRACTS.NOXPAY !== ZERO_ADDRESS;
+
+  // Read public stats from contract
+  const { data: statsData } = useReadContract({
+    address: CONTRACTS.NOXPAY as `0x${string}`,
+    abi: NOXPAY_ABI,
+    functionName: 'getPublicStats',
+    query: { enabled: hasContractConfig },
+  });
+
+  const { data: paymentCountData } = useReadContract({
+    address: CONTRACTS.NOXPAY as `0x${string}`,
+    abi: NOXPAY_ABI,
+    functionName: 'recipientPaymentCount',
+    args: address ? [address] : undefined,
+    query: { enabled: Boolean(address && hasContractConfig) },
+  });
+
+  const totalDistributed = statsData
+    ? Number(formatUnits(statsData[0] as bigint, decimals)).toLocaleString(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })
+    : '0.00';
+  const paymentCount = statsData ? Number(statsData[1]).toLocaleString() : '0';
+  const uniqueRecipients = statsData ? Number(statsData[2]).toLocaleString() : '0';
+
+  const userPaymentCount = paymentCountData ? Number(paymentCountData).toLocaleString() : '0';
   return (
     <div className="pt-8 sm:pt-16 pb-16">
       {/* Hero Section */}
@@ -150,15 +184,15 @@ export function LandingHero() {
             <div className="space-y-3">
               <div className="flex justify-between items-center py-2 border-b border-nox-border/50">
                 <span className="text-nox-lightgray text-sm">Total Distributed</span>
-                <span className="text-nox-warning font-mono font-bold">$142,500.00</span>
+                <span className="text-nox-warning font-mono font-bold">${totalDistributed} {symbol}</span>
               </div>
               <div className="flex justify-between items-center py-2 border-b border-nox-border/50">
                 <span className="text-nox-lightgray text-sm">Total Payments</span>
-                <span className="text-nox-warning font-mono font-bold">47</span>
+                <span className="text-nox-warning font-mono font-bold">{paymentCount}</span>
               </div>
               <div className="flex justify-between items-center py-2 border-b border-nox-border/50">
                 <span className="text-nox-lightgray text-sm">Recipients</span>
-                <span className="text-nox-warning font-mono font-bold">12</span>
+                <span className="text-nox-warning font-mono font-bold">{uniqueRecipients}</span>
               </div>
               <div className="flex justify-between items-center py-2">
                 <span className="text-nox-lightgray text-sm">Your Balance</span>
@@ -192,15 +226,15 @@ export function LandingHero() {
               <div className="space-y-3">
                 <div className="flex justify-between items-center py-2 border-b border-nox-border/50">
                   <span className="text-nox-lightgray text-sm">Your Balance</span>
-                  <span className="text-nox-cyan font-mono font-bold">$8,750.00</span>
+                  <span className="text-nox-cyan font-mono font-bold">{address ? 'Encrypted' : '$0.00'}</span>
                 </div>
                 <div className="flex justify-between items-center py-2 border-b border-nox-border/50">
-                  <span className="text-nox-lightgray text-sm">Last Payment</span>
-                  <span className="text-nox-cyan font-mono font-bold">$2,500.00</span>
+                  <span className="text-nox-lightgray text-sm">Payments Received</span>
+                  <span className="text-nox-cyan font-mono font-bold">{userPaymentCount}</span>
                 </div>
                 <div className="flex justify-between items-center py-2 border-b border-nox-border/50">
                   <span className="text-nox-lightgray text-sm">Vesting</span>
-                  <span className="text-nox-success font-mono font-bold">$1,200 / $5,000</span>
+                  <span className="text-nox-success font-mono font-bold">{address ? 'Hidden' : '$0.00'}</span>
                 </div>
                 <div className="flex justify-between items-center py-2">
                   <span className="text-nox-lightgray text-sm">Decrypted Via</span>

@@ -234,6 +234,22 @@ export const NOXPAY_ABI = [
   },
 ] as const;
 
+// ─── Confidential Token ABI (for unwrap) ────────────────────
+export const CONFIDENTIAL_TOKEN_ABI = [
+  {
+    name: 'unwrap',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'from', type: 'address' },
+      { name: 'to', type: 'address' },
+      { name: 'encryptedAmount', type: 'bytes32' },
+      { name: 'inputProof', type: 'bytes' },
+    ],
+    outputs: [{ name: 'requestId', type: 'bytes32' }],
+  },
+] as const;
+
 // ─── ERC-20 ABI (for approve) ──────────────────────────────
 export const ERC20_ABI = [
   {

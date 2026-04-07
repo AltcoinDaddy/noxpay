@@ -4,11 +4,11 @@ import {
   Landmark, Send, Users as UsersIcon, Plus, Trash2, Loader2,
   Clock, CalendarDays
 } from 'lucide-react';
-import { useAccount, usePublicClient, useWriteContract } from 'wagmi';
+import { useAccount, usePublicClient, useWriteContract, useWalletClient } from 'wagmi';
+import { createViemHandleClient } from '@iexec-nox/handle';
 import { isAddress, parseUnits } from 'viem';
 import {
   CONTRACTS,
-  DEMO_CONFIDENTIAL_FLOWS_ENABLED,
   NOXPAY_ABI,
   ZERO_ADDRESS,
 } from '../config/contracts';
@@ -24,6 +24,7 @@ interface Recipient {
 
 export function TreasuryDashboard() {
   const { address } = useAccount();
+  const { data: walletClient } = useWalletClient();
   const [mode, setMode] = useState<'single' | 'batch' | 'vesting'>('single');
 
   // Single payment
@@ -46,14 +47,8 @@ export function TreasuryDashboard() {
 
   const { writeContractAsync: writeContractAsync, isPending } = useWriteContract();
 
-  const confidentialFlowsEnabled = DEMO_CONFIDENTIAL_FLOWS_ENABLED;
-
   const ensureConfidentialFlowsReady = () => {
-    if (!confidentialFlowsEnabled) {
-      toast.error('Live confidential transfers need a real Nox SDK payload. Enable demo mode only if you intentionally want placeholder handles.');
-      return false;
-    }
-    if (!address || !publicClient || !hasContractConfig) {
+    if (!address || !publicClient || !hasContractConfig || !walletClient) {
       toast.error('Connect your wallet and configure the NoxPay contract first.');
       return false;
     }
@@ -78,10 +73,14 @@ export function TreasuryDashboard() {
     }
 
     try {
-      // In production, the encryptedAmount and inputProof come from the Nox JS SDK
-      // handleClient.encryptInput() returns { handle, handleProof }
-      const demoHandle = '0x' + '0'.repeat(64) as `0x${string}`;
-      const demoProof = '0x' as `0x${string}`;
+      const handleClient = await createViemHandleClient(walletClient as any);
+      const parsedAmount = parseUnits(paymentAmount, decimals);
+
+      const { handle, handleProof } = await handleClient.encryptInput(
+        parsedAmount,
+        'uint256',
+        CONTRACTS.NOXPAY
+      );
 
       const hash = await writeContractAsync({
         address: CONTRACTS.NOXPAY as `0x${string}`,
@@ -89,9 +88,9 @@ export function TreasuryDashboard() {
         functionName: 'sendConfidentialReward',
         args: [
           recipientAddr as `0x${string}`,
-          demoHandle,
-          demoProof,
-          parseUnits(paymentAmount, decimals),
+          handle as `0x${string}`,
+          handleProof as `0x${string}`,
+          parsedAmount,
         ],
         ...contractConfig,
       });
@@ -125,10 +124,23 @@ export function TreasuryDashboard() {
     }
 
     try {
+      const handleClient = await createViemHandleClient(walletClient as any);
+      
       const addresses = validRecipients.map(r => r.address as `0x${string}`);
-      const handles = validRecipients.map(() => ('0x' + '0'.repeat(64)) as `0x${string}`);
-      const proofs = validRecipients.map(() => '0x' as `0x${string}`);
       const amounts = validRecipients.map(r => parseUnits(r.amount, decimals));
+      
+      const handles: `0x${string}`[] = [];
+      const proofs: `0x${string}`[] = [];
+
+      for (const amount of amounts) {
+        const { handle, handleProof } = await handleClient.encryptInput(
+          amount,
+          'uint256',
+          CONTRACTS.NOXPAY
+        );
+        handles.push(handle as `0x${string}`);
+        proofs.push(handleProof as `0x${string}`);
+      }
 
       const hash = await writeContractAsync({
         address: CONTRACTS.NOXPAY as `0x${string}`,
@@ -165,8 +177,15 @@ export function TreasuryDashboard() {
     }
 
     try {
-      const demoHandle = '0x' + '0'.repeat(64) as `0x${string}`;
-      const demoProof = '0x' as `0x${string}`;
+      const handleClient = await createViemHandleClient(walletClient as any);
+      const parsedAmount = parseUnits(vestingAmount, decimals);
+
+      const { handle, handleProof } = await handleClient.encryptInput(
+        parsedAmount,
+        'uint256',
+        CONTRACTS.NOXPAY
+      );
+      
       const durationSeconds = BigInt(parseInt(vestingDays) * 86400);
 
       const hash = await writeContractAsync({
@@ -175,9 +194,9 @@ export function TreasuryDashboard() {
         functionName: 'createVestingSchedule',
         args: [
           vestingAddr as `0x${string}`,
-          demoHandle,
-          demoProof,
-          parseUnits(vestingAmount, decimals),
+          handle as `0x${string}`,
+          handleProof as `0x${string}`,
+          parsedAmount,
           durationSeconds,
         ],
         ...contractConfig,
@@ -236,17 +255,6 @@ export function TreasuryDashboard() {
           </p>
         </div>
       </div>
-
-      {!confidentialFlowsEnabled && (
-        <div className="mb-6 rounded-xl border border-nox-warning/20 bg-nox-warning/5 p-4">
-          <p className="text-sm text-nox-lightgray">
-            Treasury transfers and vesting need real encrypted inputs from the Nox SDK.
-            This repo now blocks fake success states by default. Set
-            <code className="mx-1">VITE_ENABLE_DEMO_CONFIDENTIAL_FLOWS=true</code>
-            only if you intentionally want placeholder handles for demos.
-          </p>
-        </div>
-      )}
 
       {/* Mode Tabs */}
       <div className="flex gap-2 mb-6 overflow-x-auto">
@@ -329,7 +337,7 @@ export function TreasuryDashboard() {
 
               <button
                 onClick={handleSendSingle}
-                disabled={isPending || !address || !hasContractConfig || !confidentialFlowsEnabled}
+                disabled={isPending || !address || !hasContractConfig || !walletClient}
                 className="btn-gold w-full flex items-center justify-center gap-2 py-3.5"
               >
                 {isPending ? (
@@ -425,7 +433,7 @@ export function TreasuryDashboard() {
 
             <button
               onClick={handleSendBatch}
-              disabled={isPending || !address || !hasContractConfig || !confidentialFlowsEnabled}
+              disabled={isPending || !address || !hasContractConfig || !walletClient}
               className="btn-gold w-full flex items-center justify-center gap-2 py-3.5"
             >
               {isPending ? (
@@ -538,7 +546,7 @@ export function TreasuryDashboard() {
 
               <button
                 onClick={handleCreateVesting}
-                disabled={isPending || !address || !hasContractConfig || !confidentialFlowsEnabled}
+                disabled={isPending || !address || !hasContractConfig || !walletClient}
                 className="btn-gold w-full flex items-center justify-center gap-2 py-3.5"
               >
                 {isPending ? (

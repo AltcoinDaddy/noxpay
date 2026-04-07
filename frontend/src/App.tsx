@@ -6,6 +6,7 @@ import { TreasuryDashboard } from './components/TreasuryDashboard';
 import { RecipientDashboard } from './components/RecipientDashboard';
 import { PublicStats } from './components/PublicStats';
 import { ShieldTokens } from './components/ShieldTokens';
+import { UnshieldTokens } from './components/UnshieldTokens';
 import { SelectiveDisclosure } from './components/SelectiveDisclosure';
 import { Footer } from './components/Footer';
 
@@ -42,6 +43,7 @@ function App() {
             <div className="space-y-8 pt-8">
               <PublicStats />
               <RecipientDashboard />
+              <UnshieldTokens />
               <SelectiveDisclosure />
             </div>
           )}

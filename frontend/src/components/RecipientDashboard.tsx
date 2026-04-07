@@ -4,9 +4,13 @@ import {
   Clock, Info
 } from 'lucide-react';
 import { formatUnits } from 'viem';
-import { useAccount, useReadContract, useReadContracts } from 'wagmi';
+import { useAccount, useReadContract, useReadContracts, useWalletClient, useWriteContract, usePublicClient } from 'wagmi';
 import { CONTRACTS, NOXPAY_ABI, ZERO_ADDRESS } from '../config/contracts';
 import { useTokenMetadata } from '../hooks/useTokenMetadata';
+import { useContractConfig } from '../hooks/useContractConfig';
+import { useState } from 'react';
+import { createViemHandleClient } from '@iexec-nox/handle';
+import toast from 'react-hot-toast';
 
 type VestingScheduleResult = readonly [bigint, bigint, bigint, bigint, string, boolean];
 
@@ -32,8 +36,16 @@ function readBigIntResult(value: unknown) {
 
 export function RecipientDashboard() {
   const { address } = useAccount();
+  const { data: walletClient } = useWalletClient();
+  const publicClient = usePublicClient();
   const { decimals, symbol } = useTokenMetadata();
+  const contractConfig = useContractConfig();
   const hasContractConfig = CONTRACTS.NOXPAY !== ZERO_ADDRESS;
+
+  const [decryptedBalance, setDecryptedBalance] = useState<string | null>(null);
+  const [isDecrypting, setIsDecrypting] = useState(false);
+  const [claimingId, setClaimingId] = useState<number | null>(null);
+  const { writeContractAsync } = useWriteContract();
 
   const { data: balanceHandle } = useReadContract({
     address: CONTRACTS.NOXPAY as `0x${string}`,
@@ -98,6 +110,7 @@ export function RecipientDashboard() {
       const vestedAmount = readBigIntResult(vestedAmountData?.[index]?.result);
       const totalAmount = rawSchedule[0];
       const claimedAmount = rawSchedule[1];
+      const claimableBigInt = vestedAmount - claimedAmount;
       const startTime = Number(rawSchedule[2]);
       const duration = Number(rawSchedule[3]);
       const isActive = rawSchedule[5];
@@ -110,6 +123,7 @@ export function RecipientDashboard() {
         total: formatCurrencyAmount(totalAmount, decimals),
         claimed: formatCurrencyAmount(claimedAmount, decimals),
         vested: formatCurrencyAmount(vestedAmount, decimals),
+        claimableBigInt,
         progress: Math.min(progress, 100),
         daysLeft,
         active: isActive,
@@ -119,6 +133,61 @@ export function RecipientDashboard() {
 
   const paymentCount = Number(paymentCountData ?? 0n).toLocaleString();
   const hasEncryptedBalance = balanceHandle && balanceHandle !== ('0x' + '0'.repeat(64));
+
+  const handleDecryptBalance = async () => {
+    if (!walletClient || !balanceHandle) return;
+    try {
+      setIsDecrypting(true);
+      const handleClient = await createViemHandleClient(walletClient as any);
+      const { value } = await handleClient.decrypt(balanceHandle as `0x${string}`);
+      setDecryptedBalance(formatCurrencyAmount(BigInt(value), decimals));
+      toast.success('Balance decrypted locally via TEE!');
+    } catch (e) {
+      console.error('Decryption failed:', e);
+      toast.error('Failed to decrypt balance');
+    } finally {
+      setIsDecrypting(false);
+    }
+  };
+
+  const handleClaimVested = async (scheduleId: number, claimableBigInt: bigint) => {
+    if (!walletClient || !publicClient) return;
+    if (claimableBigInt <= 0n) {
+      toast.error('No tokens available to claim right now');
+      return;
+    }
+    
+    try {
+      setClaimingId(scheduleId);
+      const handleClient = await createViemHandleClient(walletClient as any);
+      
+      const { handle, handleProof } = await handleClient.encryptInput(
+        claimableBigInt,
+        'uint256',
+        CONTRACTS.NOXPAY
+      );
+
+      const hash = await writeContractAsync({
+        address: CONTRACTS.NOXPAY as `0x${string}`,
+        abi: NOXPAY_ABI,
+        functionName: 'claimVested',
+        args: [
+          BigInt(scheduleId),
+          handle as `0x${string}`,
+          handleProof as `0x${string}`
+        ],
+        ...contractConfig
+      });
+      await publicClient.waitForTransactionReceipt({ hash });
+      
+      toast.success('Successfully claimed vested tokens!');
+    } catch (e) {
+      console.error('Claiming failed:', e);
+      toast.error('Failed to claim vested tokens');
+    } finally {
+      setClaimingId(null);
+    }
+  };
 
   return (
     <motion.section
@@ -163,21 +232,35 @@ export function RecipientDashboard() {
 
               <div className="mb-2">
                 <p className="text-2xl sm:text-3xl font-bold font-mono text-nox-cyan mb-1 break-all">
-                  {hasEncryptedBalance ? shortHandle(balanceHandle) : '$••,•••.••'}
+                  {decryptedBalance !== null
+                    ? `$${decryptedBalance} ${symbol}`
+                    : hasEncryptedBalance 
+                      ? shortHandle(balanceHandle) 
+                      : '$0.00'}
                 </p>
                 <p className="text-sm text-nox-lightgray">
-                  {hasEncryptedBalance
-                    ? 'Encrypted balance handle loaded from the contract.'
-                    : 'No encrypted balance handle found for this wallet yet.'}
+                  {decryptedBalance !== null
+                    ? 'Actual balance decrypted locally.'
+                    : hasEncryptedBalance
+                      ? 'Encrypted balance handle loaded from the contract.'
+                      : 'No encrypted balance handle found for this wallet yet.'}
                 </p>
               </div>
 
               <button
-                disabled
-                className="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-semibold bg-nox-cyan/10 text-nox-cyan border border-nox-cyan/20 opacity-70 cursor-not-allowed"
+                onClick={handleDecryptBalance}
+                disabled={isDecrypting || !hasEncryptedBalance || !walletClient}
+                className={`mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-semibold transition-all ${
+                  hasEncryptedBalance && walletClient && !isDecrypting
+                    ? 'bg-nox-cyan/20 text-nox-cyan border border-nox-cyan/40 hover:bg-nox-cyan/30 cursor-pointer'
+                    : 'bg-nox-cyan/10 text-nox-cyan border border-nox-cyan/20 opacity-70 cursor-not-allowed'
+                }`}
               >
-                <Unlock className="w-4 h-4" />
-                Nox SDK Needed For Decryption
+                {isDecrypting ? (
+                  <><RefreshCw className="w-4 h-4 animate-spin" /> Decrypting via TEE...</>
+                ) : (
+                  <><Unlock className="w-4 h-4" /> Decrypt Balance</>
+                )}
               </button>
 
               <div className="mt-4 pt-4 border-t border-nox-border/50 space-y-3">
@@ -241,11 +324,17 @@ export function RecipientDashboard() {
                     </div>
 
                     <button
-                      disabled
-                      className="btn-gold w-full flex items-center justify-center gap-2 py-2.5 text-sm opacity-60 cursor-not-allowed"
+                      onClick={() => handleClaimVested(schedule.id, schedule.claimableBigInt)}
+                      disabled={claimingId !== null || !schedule.active || schedule.claimableBigInt <= 0n}
+                      className={`btn-gold w-full flex items-center justify-center gap-2 py-2.5 text-sm transition-all ${
+                        (!schedule.active || schedule.claimableBigInt <= 0n) ? 'opacity-60 cursor-not-allowed' : ''
+                      }`}
                     >
-                      <Download className="w-4 h-4" />
-                      Claim Requires Encrypted Proof
+                      {claimingId === schedule.id ? (
+                        <><RefreshCw className="w-4 h-4 animate-spin" /> Claiming...</>
+                      ) : (
+                        <><Download className="w-4 h-4" /> Claim Vested Tokens</>
+                      )}
                     </button>
                   </div>
                 ))}
