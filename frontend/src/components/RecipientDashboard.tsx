@@ -8,6 +8,8 @@ import { useAccount, useReadContract, useReadContracts } from 'wagmi';
 import { CONTRACTS, NOXPAY_ABI, ZERO_ADDRESS } from '../config/contracts';
 import { useTokenMetadata } from '../hooks/useTokenMetadata';
 
+type VestingScheduleResult = readonly [bigint, bigint, bigint, bigint, string, boolean];
+
 function formatCurrencyAmount(value: bigint, decimals: number) {
   return Number(formatUnits(value, decimals)).toLocaleString(undefined, {
     minimumFractionDigits: 2,
@@ -18,6 +20,14 @@ function formatCurrencyAmount(value: bigint, decimals: number) {
 function shortHandle(handle?: string) {
   if (!handle) return 'No encrypted balance yet';
   return `${handle.slice(0, 10)}...${handle.slice(-8)}`;
+}
+
+function isVestingScheduleResult(value: unknown): value is VestingScheduleResult {
+  return Array.isArray(value) && value.length === 6;
+}
+
+function readBigIntResult(value: unknown) {
+  return typeof value === 'bigint' ? value : 0n;
 }
 
 export function RecipientDashboard() {
@@ -81,16 +91,16 @@ export function RecipientDashboard() {
   const vestingSchedules = scheduleIndexes
     .map((scheduleId, index) => {
       const rawSchedule = vestingScheduleData?.[index]?.result;
-      if (!rawSchedule) {
+      if (!isVestingScheduleResult(rawSchedule)) {
         return null;
       }
 
-      const vestedAmount = (vestedAmountData?.[index]?.result as bigint | undefined) ?? 0n;
-      const totalAmount = rawSchedule[0] as bigint;
-      const claimedAmount = rawSchedule[1] as bigint;
+      const vestedAmount = readBigIntResult(vestedAmountData?.[index]?.result);
+      const totalAmount = rawSchedule[0];
+      const claimedAmount = rawSchedule[1];
       const startTime = Number(rawSchedule[2]);
       const duration = Number(rawSchedule[3]);
-      const isActive = Boolean(rawSchedule[5]);
+      const isActive = rawSchedule[5];
       const progress = totalAmount === 0n ? 0 : Number((vestedAmount * 100n) / totalAmount);
       const endTime = startTime + duration;
       const daysLeft = Math.max(Math.ceil((endTime * 1000 - Date.now()) / (1000 * 60 * 60 * 24)), 0);
