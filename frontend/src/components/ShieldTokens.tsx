@@ -1,8 +1,15 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Shield, ArrowDownUp, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
-import { useAccount, usePublicClient, useWriteContract } from 'wagmi';
-import { parseUnits } from 'viem';
+import {
+  useAccount,
+  useChainId,
+  usePublicClient,
+  useReadContract,
+  useWriteContract,
+} from 'wagmi';
+import { formatUnits, isAddress, parseUnits } from 'viem';
+import { arbitrumSepolia } from 'wagmi/chains';
 import { CONTRACTS, NOXPAY_ABI, ERC20_ABI, ZERO_ADDRESS } from '../config/contracts';
 import { useContractConfig } from '../hooks/useContractConfig';
 import { useTokenMetadata } from '../hooks/useTokenMetadata';
@@ -10,19 +17,68 @@ import toast from 'react-hot-toast';
 
 export function ShieldTokens() {
   const { address } = useAccount();
+  const chainId = useChainId();
   const [amount, setAmount] = useState('');
+  const [faucetRecipient, setFaucetRecipient] = useState('');
+  const [faucetAmount, setFaucetAmount] = useState('1000');
   const [step, setStep] = useState<'idle' | 'approving' | 'shielding' | 'done'>('idle');
+  const [isFunding, setIsFunding] = useState(false);
   const contractConfig = useContractConfig();
   const publicClient = usePublicClient();
   const { decimals, symbol, hasTokenConfig } = useTokenMetadata();
   const hasContractConfig =
     CONTRACTS.NOXPAY !== ZERO_ADDRESS && CONTRACTS.UNDERLYING_TOKEN !== ZERO_ADDRESS;
+  const hasCorrectChain = chainId === arbitrumSepolia.id;
 
-  const { writeContractAsync: writeContractAsync, isPending } = useWriteContract();
+  const { writeContractAsync, isPending } = useWriteContract();
+  const { data: balanceData } = useReadContract({
+    address: CONTRACTS.UNDERLYING_TOKEN as `0x${string}`,
+    abi: ERC20_ABI,
+    functionName: 'balanceOf',
+    args: address ? [address] : undefined,
+    query: { enabled: Boolean(address && hasTokenConfig) },
+  });
+  const { data: allowanceData } = useReadContract({
+    address: CONTRACTS.UNDERLYING_TOKEN as `0x${string}`,
+    abi: ERC20_ABI,
+    functionName: 'allowance',
+    args: address ? [address, CONTRACTS.NOXPAY as `0x${string}`] : undefined,
+    query: { enabled: Boolean(address && hasContractConfig && hasTokenConfig) },
+  });
+  const { data: treasuryData } = useReadContract({
+    address: CONTRACTS.NOXPAY as `0x${string}`,
+    abi: NOXPAY_ABI,
+    functionName: 'treasury',
+    query: { enabled: hasContractConfig },
+  });
+
+  const underlyingBalance = balanceData ?? 0n;
+  const allowance = allowanceData ?? 0n;
+  const treasury = treasuryData;
+  const isTreasury = Boolean(
+    address &&
+    treasury &&
+    address.toLowerCase() === treasury.toLowerCase()
+  );
+  const parsedAmount = safeParseAmount(amount, decimals);
+  const hasEnoughBalance = parsedAmount !== null && parsedAmount <= underlyingBalance;
+  const needsApproval = parsedAmount !== null && allowance < parsedAmount;
+  const balanceLabel = formatDisplayAmount(underlyingBalance, decimals);
+  const allowanceLabel = formatDisplayAmount(allowance, decimals);
+
+  useEffect(() => {
+    if (address) {
+      setFaucetRecipient((currentRecipient) => currentRecipient || address);
+    }
+  }, [address]);
 
   const handleShield = async () => {
     if (!amount || parseFloat(amount) <= 0) {
       toast.error('Enter a valid amount');
+      return;
+    }
+    if (!hasCorrectChain) {
+      toast.error('Switch your wallet to Arbitrum Sepolia first.');
       return;
     }
     if (!address || !publicClient || !hasContractConfig || !hasTokenConfig) {
@@ -31,38 +87,93 @@ export function ShieldTokens() {
     }
 
     try {
-      const parsedAmount = parseUnits(amount, decimals);
-      setStep('approving');
+      const amountToShield = safeParseAmount(amount, decimals);
+      if (amountToShield === null || amountToShield <= 0n) {
+        toast.error(`Enter a valid ${symbol} amount with at most ${decimals} decimals.`);
+        return;
+      }
+      if (underlyingBalance === 0n) {
+        toast.error(`This wallet has no ${symbol} available to shield yet.`);
+        return;
+      }
+      if (amountToShield > underlyingBalance) {
+        toast.error(`Insufficient ${symbol} balance. Available: ${balanceLabel} ${symbol}.`);
+        return;
+      }
 
-      // Step 1: Approve ERC-20 spending
-      const approveHash = await writeContractAsync({
-        address: CONTRACTS.UNDERLYING_TOKEN as `0x${string}`,
-        abi: ERC20_ABI,
-        functionName: 'approve',
-        args: [CONTRACTS.NOXPAY as `0x${string}`, parsedAmount],
-        ...contractConfig,
-      });
-      await publicClient.waitForTransactionReceipt({ hash: approveHash });
+      if (allowance < amountToShield) {
+        setStep('approving');
+        const approveHash = await writeContractAsync({
+          address: CONTRACTS.UNDERLYING_TOKEN as `0x${string}`,
+          abi: ERC20_ABI,
+          functionName: 'approve',
+          args: [CONTRACTS.NOXPAY as `0x${string}`, amountToShield],
+          ...contractConfig,
+        });
+        await publicClient.waitForTransactionReceipt({ hash: approveHash });
+        toast.success('Approval confirmed. Shielding tokens...');
+      }
 
-      toast.success('Approval confirmed. Shielding tokens...');
       setStep('shielding');
-
-      // Step 2: Shield (wrap into confidential token)
       const shieldHash = await writeContractAsync({
         address: CONTRACTS.NOXPAY as `0x${string}`,
         abi: NOXPAY_ABI,
         functionName: 'shieldTokens',
-        args: [parsedAmount],
+        args: [amountToShield],
         ...contractConfig,
       });
       await publicClient.waitForTransactionReceipt({ hash: shieldHash });
 
       setStep('done');
-      toast.success(`Successfully shielded ${amount} ${symbol}.`);
+      setAmount('');
+      toast.success(`Successfully shielded ${formatDisplayAmount(amountToShield, decimals)} ${symbol}.`);
     } catch (err: unknown) {
       console.error('Shield error:', err);
-      toast.error('Shielding failed. Check your wallet or console for details.');
+      toast.error(getShieldErrorMessage(err, symbol));
       setStep('idle');
+    }
+  };
+
+  const handleMintDemoFunds = async () => {
+    if (!address || !publicClient || !hasTokenConfig || !hasContractConfig) {
+      toast.error('Connect your wallet and configure the demo contracts first.');
+      return;
+    }
+    if (!hasCorrectChain) {
+      toast.error('Switch your wallet to Arbitrum Sepolia first.');
+      return;
+    }
+    if (!isTreasury) {
+      toast.error('Only the treasury wallet can mint demo funds in this setup.');
+      return;
+    }
+    if (!faucetRecipient || !isAddress(faucetRecipient)) {
+      toast.error('Enter a valid recipient address for demo funding.');
+      return;
+    }
+
+    const mintAmount = safeParseAmount(faucetAmount, decimals);
+    if (mintAmount === null || mintAmount <= 0n) {
+      toast.error(`Enter a valid demo funding amount in ${symbol}.`);
+      return;
+    }
+
+    try {
+      setIsFunding(true);
+      const hash = await writeContractAsync({
+        address: CONTRACTS.UNDERLYING_TOKEN as `0x${string}`,
+        abi: ERC20_ABI,
+        functionName: 'mint',
+        args: [faucetRecipient as `0x${string}`, mintAmount],
+        ...contractConfig,
+      });
+      await publicClient.waitForTransactionReceipt({ hash });
+      toast.success(`Minted ${formatDisplayAmount(mintAmount, decimals)} ${symbol} to ${shortAddress(faucetRecipient)}.`);
+    } catch (err) {
+      console.error('Demo funding error:', err);
+      toast.error(getMintErrorMessage(err, symbol));
+    } finally {
+      setIsFunding(false);
     }
   };
 
@@ -100,8 +211,87 @@ export function ShieldTokens() {
           </div>
         </div>
 
-        {/* Amount Input */}
         <div className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <InfoStat label={`Wallet ${symbol} Balance`} value={`${balanceLabel} ${symbol}`} />
+            <InfoStat label="Approved For Shielding" value={`${allowanceLabel} ${symbol}`} />
+          </div>
+
+          {hasContractConfig && (
+            <div className="rounded-xl border border-nox-cyan/20 bg-nox-cyan/5 p-4 space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-white">Demo Funding</p>
+                  <p className="text-xs text-nox-lightgray mt-1">
+                    The live Sepolia demo uses mock {symbol}. The treasury wallet can mint test funds here before shielding.
+                  </p>
+                </div>
+                <span className="text-[11px] font-semibold text-nox-cyan bg-nox-cyan/10 border border-nox-cyan/20 px-2.5 py-1 rounded-full whitespace-nowrap">
+                  {isTreasury ? 'TREASURY CONNECTED' : 'TREASURY ONLY'}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-[1.5fr_1fr] gap-3">
+                <input
+                  type="text"
+                  value={faucetRecipient}
+                  onChange={(e) => setFaucetRecipient(e.target.value)}
+                  placeholder="Recipient address"
+                  className="nox-input font-mono text-sm"
+                />
+                <div className="relative">
+                  <input
+                    type="number"
+                    value={faucetAmount}
+                    onChange={(e) => setFaucetAmount(e.target.value)}
+                    placeholder="1000"
+                    className="nox-input pr-20 font-mono text-sm"
+                    min="0"
+                    step="0.01"
+                  />
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-nox-lightgray text-xs font-medium">
+                    {symbol}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex gap-2 flex-wrap">
+                {['100', '500', '1000', '5000'].map((val) => (
+                  <button
+                    key={val}
+                    type="button"
+                    onClick={() => setFaucetAmount(val)}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium text-nox-lightgray border border-nox-border hover:border-nox-cyan hover:text-nox-cyan transition-all cursor-pointer"
+                  >
+                    Mint {Number(val).toLocaleString()}
+                  </button>
+                ))}
+              </div>
+
+              <button
+                type="button"
+                onClick={handleMintDemoFunds}
+                disabled={!isTreasury || !hasCorrectChain || isFunding}
+                className="btn-cyan w-full flex items-center justify-center gap-2 text-sm py-3"
+              >
+                {isFunding ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Minting Demo Funds...
+                  </>
+                ) : (
+                  <>Mint Demo {symbol}</>
+                )}
+              </button>
+
+              {!isTreasury && treasury && (
+                <p className="text-xs text-nox-lightgray">
+                  Connect the treasury wallet {shortAddress(treasury)} to mint demo funds from the UI.
+                </p>
+              )}
+            </div>
+          )}
+
           <div>
             <label className="block text-sm font-medium text-nox-lightgray mb-2">
               Amount to Shield
@@ -120,9 +310,21 @@ export function ShieldTokens() {
                 {symbol}
               </span>
             </div>
+            <div className="mt-2 flex items-center justify-between gap-3 text-xs">
+              <span className="text-nox-lightgray">
+                NoxPay first pulls your underlying token, then wraps it into the confidential token.
+              </span>
+              <button
+                type="button"
+                onClick={() => setAmount(formatUnits(underlyingBalance, decimals))}
+                disabled={underlyingBalance === 0n}
+                className="text-nox-gold hover:text-nox-deepgold disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer font-medium"
+              >
+                Max
+              </button>
+            </div>
           </div>
 
-          {/* Quick amounts */}
           <div className="flex gap-2 flex-wrap">
             {['100', '500', '1000', '5000'].map((val) => (
               <button
@@ -135,14 +337,13 @@ export function ShieldTokens() {
             ))}
           </div>
 
-          {/* Status */}
           {step !== 'idle' && (
             <div className="flex flex-col gap-3 p-4 rounded-xl bg-nox-dark/50 border border-nox-border/50">
               <StepIndicator
                 active={step === 'approving'}
                 completed={step === 'shielding' || step === 'done'}
                 loading={isPending && step === 'approving'}
-                label="Approve ERC-20 spending"
+                label={needsApproval ? 'Approve ERC-20 spending' : 'Existing approval is sufficient'}
               />
               <StepIndicator
                 active={step === 'shielding'}
@@ -159,10 +360,20 @@ export function ShieldTokens() {
             </div>
           )}
 
-          {/* Shield Button */}
           <button
             onClick={handleShield}
-            disabled={!amount || step === 'approving' || step === 'shielding' || !address || !hasContractConfig}
+            disabled={
+              !amount ||
+              step === 'approving' ||
+              step === 'shielding' ||
+              !address ||
+              !hasContractConfig ||
+              !hasTokenConfig ||
+              !hasCorrectChain ||
+              parsedAmount === null ||
+              parsedAmount <= 0n ||
+              !hasEnoughBalance
+            }
             className="btn-gold w-full flex items-center justify-center gap-2 text-base py-3.5"
           >
             {step === 'approving' || step === 'shielding' ? (
@@ -178,7 +389,7 @@ export function ShieldTokens() {
             ) : (
               <>
                 <Shield className="w-5 h-5" />
-                Shield Tokens
+                {needsApproval ? 'Approve + Shield Tokens' : 'Shield Tokens'}
               </>
             )}
           </button>
@@ -188,14 +399,38 @@ export function ShieldTokens() {
               Connect your wallet to shield tokens
             </p>
           )}
+          {address && !hasCorrectChain && (
+            <p className="text-center text-sm text-nox-lightgray">
+              Switch to Arbitrum Sepolia to shield tokens on this deployment.
+            </p>
+          )}
           {address && !hasContractConfig && (
             <p className="text-center text-sm text-nox-lightgray">
               Add valid token and contract addresses to enable shielding.
             </p>
           )}
+          {address && hasCorrectChain && hasContractConfig && hasTokenConfig && underlyingBalance === 0n && (
+            <p className="text-center text-sm text-nox-lightgray">
+              This wallet currently has no {symbol} to shield. On the live Sepolia demo, shielding will revert until the wallet receives some underlying tokens first.
+            </p>
+          )}
+          {address && hasCorrectChain && parsedAmount !== null && parsedAmount > underlyingBalance && (
+            <p className="text-center text-sm text-nox-lightgray">
+              The entered amount is larger than your available {symbol} balance.
+            </p>
+          )}
         </div>
       </div>
     </motion.section>
+  );
+}
+
+function InfoStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl border border-nox-border/60 bg-nox-dark/40 px-4 py-3">
+      <p className="text-xs text-nox-lightgray mb-1">{label}</p>
+      <p className="text-sm font-mono text-white">{value}</p>
+    </div>
   );
 }
 
@@ -218,4 +453,93 @@ function StepIndicator({ active, completed, loading, label }: {
       </span>
     </div>
   );
+}
+
+function safeParseAmount(value: string, decimals: number) {
+  if (!value) return null;
+  try {
+    return parseUnits(value, decimals);
+  } catch {
+    return null;
+  }
+}
+
+function formatDisplayAmount(value: bigint, decimals: number) {
+  return Number(formatUnits(value, decimals)).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function getShieldErrorMessage(error: unknown, symbol: string) {
+  const err = error as {
+    shortMessage?: string;
+    message?: string;
+    cause?: { shortMessage?: string; message?: string };
+  };
+
+  const rawMessage =
+    err?.shortMessage ||
+    err?.cause?.shortMessage ||
+    err?.message ||
+    err?.cause?.message ||
+    '';
+  const lower = rawMessage.toLowerCase();
+
+  if (!rawMessage) {
+    return 'Shielding failed. Check your wallet and try again.';
+  }
+  if (lower.includes('user rejected')) {
+    return 'Shielding was cancelled in your wallet.';
+  }
+  if (lower.includes('insufficient') && lower.includes('fund')) {
+    return 'Your wallet does not have enough ETH on Arbitrum Sepolia to pay gas.';
+  }
+  if (lower.includes('transfer amount exceeds balance') || lower.includes('transferfrom failed')) {
+    return `Your wallet does not have enough ${symbol} to shield that amount.`;
+  }
+  if (lower.includes('chain mismatch') || lower.includes('chain disconnected')) {
+    return 'Switch your wallet to Arbitrum Sepolia and try again.';
+  }
+
+  return rawMessage.length > 160
+    ? 'Shielding failed. Check the wallet prompt or browser console for the detailed revert.'
+    : rawMessage;
+}
+
+function getMintErrorMessage(error: unknown, symbol: string) {
+  const err = error as {
+    shortMessage?: string;
+    message?: string;
+    cause?: { shortMessage?: string; message?: string };
+  };
+
+  const rawMessage =
+    err?.shortMessage ||
+    err?.cause?.shortMessage ||
+    err?.message ||
+    err?.cause?.message ||
+    '';
+  const lower = rawMessage.toLowerCase();
+
+  if (!rawMessage) {
+    return `Minting demo ${symbol} failed.`;
+  }
+  if (lower.includes('user rejected')) {
+    return 'Minting was cancelled in your wallet.';
+  }
+  if (lower.includes('onlyowner') || lower.includes('ownable')) {
+    return 'The connected wallet is not allowed to mint demo funds.';
+  }
+  if (lower.includes('insufficient') && lower.includes('fund')) {
+    return 'The treasury wallet does not have enough ETH on Arbitrum Sepolia to pay gas.';
+  }
+
+  return rawMessage.length > 160
+    ? `Minting demo ${symbol} failed. Check the wallet prompt or browser console for the detailed revert.`
+    : rawMessage;
+}
+
+function shortAddress(address: string) {
+  return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
