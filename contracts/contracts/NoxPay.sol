@@ -31,63 +31,12 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-
-/**
- * @dev Interface for the iExec Nox Confidential Token (ERC-7984 wrapper).
- *      In production, this would be imported from iexec-nox/nox-confidential-contracts.
- *      The interface represents the core functions of the ERC20ToERC7984Wrapper.
- */
-interface IConfidentialToken {
-    /// @notice Wraps ERC-20 tokens into confidential ERC-7984 tokens
-    /// @param to The recipient of the confidential tokens
-    /// @param amount The plaintext amount to wrap (visible during wrapping)
-    /// @return handle The encrypted handle representing the wrapped amount
-    function wrap(address to, uint256 amount) external returns (bytes32 handle);
-
-    /// @notice Initiates unwrapping of confidential tokens back to ERC-20
-    /// @param from The address to burn confidential tokens from
-    /// @param to The address to receive ERC-20 tokens
-    /// @param encryptedAmount The encrypted amount handle
-    /// @param inputProof The proof for the encrypted input
-    /// @return requestId The unwrap request ID for finalization
-    function unwrap(
-        address from,
-        address to,
-        bytes32 encryptedAmount,
-        bytes calldata inputProof
-    ) external returns (bytes32 requestId);
-
-    /// @notice Performs a confidential transfer between addresses
-    /// @param from Sender address
-    /// @param to Recipient address
-    /// @param encryptedAmount The encrypted amount handle
-    /// @param inputProof The proof for the encrypted input
-    /// @return success Whether the transfer succeeded (encrypted boolean)
-    function confidentialTransfer(
-        address from,
-        address to,
-        bytes32 encryptedAmount,
-        bytes calldata inputProof
-    ) external returns (bytes32 success);
-
-    /// @notice Returns the encrypted balance handle for an address
-    /// @param account The address to query
-    /// @return handle The encrypted balance handle
-    function confidentialBalanceOf(address account) external view returns (bytes32 handle);
-
-    /// @notice Grants view access to a specific address for a handle
-    /// @param handle The encrypted handle to grant access to
-    /// @param viewer The address being granted view access
-    function addViewer(bytes32 handle, address viewer) external;
-
-    /// @notice Removes view access for a specific address when supported
-    /// @param handle The encrypted handle to revoke access from
-    /// @param viewer The address whose access is being revoked
-    function removeViewer(bytes32 handle, address viewer) external;
-
-    /// @notice Returns the underlying ERC-20 token address
-    function underlying() external view returns (address);
-}
+import {IERC20ToERC7984Wrapper} from "@iexec-nox/nox-confidential-contracts/contracts/interfaces/IERC20ToERC7984Wrapper.sol";
+import {
+    Nox,
+    euint256,
+    externalEuint256
+} from "@iexec-nox/nox-protocol-contracts/contracts/sdk/Nox.sol";
 
 /**
  * @title NoxPay
@@ -101,7 +50,7 @@ contract NoxPay is Ownable, ReentrancyGuard {
     // ═══════════════════════════════════════════════════════════
 
     /// @notice The confidential token (ERC-7984 wrapper) used for payments
-    IConfidentialToken public confidentialToken;
+    IERC20ToERC7984Wrapper public confidentialToken;
 
     /// @notice The underlying ERC-20 token
     IERC20 public underlyingToken;
@@ -232,6 +181,7 @@ contract NoxPay is Ownable, ReentrancyGuard {
     error InvalidAddress();
     error InvalidAmount();
     error InvalidDuration();
+    error TreasuryOperatorApprovalMissing();
     error GrantNotActive();
     error VestingNotActive();
     error NothingToClaim();
@@ -264,9 +214,17 @@ contract NoxPay is Ownable, ReentrancyGuard {
         if (_confidentialToken == address(0)) revert InvalidAddress();
         if (_treasury == address(0)) revert InvalidAddress();
 
-        confidentialToken = IConfidentialToken(_confidentialToken);
+        confidentialToken = IERC20ToERC7984Wrapper(_confidentialToken);
         underlyingToken = IERC20(_underlyingToken);
         treasury = _treasury;
+    }
+
+    function _toExternalHandle(bytes32 handle) internal pure returns (externalEuint256) {
+        return externalEuint256.wrap(handle);
+    }
+
+    function _toHandle(euint256 handle) internal pure returns (bytes32) {
+        return euint256.unwrap(handle);
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -290,7 +248,7 @@ contract NoxPay is Ownable, ReentrancyGuard {
         underlyingToken.approve(address(confidentialToken), amount);
 
         // Wrap into confidential tokens, minting to the user
-        handle = confidentialToken.wrap(msg.sender, amount);
+        handle = _toHandle(confidentialToken.wrap(msg.sender, amount));
 
         emit TokensShielded(msg.sender, amount, block.timestamp);
     }
@@ -315,12 +273,15 @@ contract NoxPay is Ownable, ReentrancyGuard {
         uint256 publicAmount
     ) external onlyTreasury nonReentrant {
         if (to == address(0)) revert InvalidAddress();
+        if (!confidentialToken.isOperator(msg.sender, address(this))) {
+            revert TreasuryOperatorApprovalMissing();
+        }
 
-        // Perform confidential transfer from treasury to recipient
-        confidentialToken.confidentialTransfer(
+        // Perform confidential transfer from treasury to recipient.
+        confidentialToken.confidentialTransferFrom(
             msg.sender,
             to,
-            encryptedAmount,
+            _toExternalHandle(encryptedAmount),
             inputProof
         );
 
@@ -356,6 +317,9 @@ contract NoxPay is Ownable, ReentrancyGuard {
             length != inputProofs.length ||
             length != publicAmounts.length
         ) revert ArrayLengthMismatch();
+        if (!confidentialToken.isOperator(msg.sender, address(this))) {
+            revert TreasuryOperatorApprovalMissing();
+        }
 
         uint256 totalPublicAmount = 0;
 
@@ -363,10 +327,10 @@ contract NoxPay is Ownable, ReentrancyGuard {
             if (recipients[i] == address(0)) revert InvalidAddress();
 
             // Perform confidential transfer
-            confidentialToken.confidentialTransfer(
+            confidentialToken.confidentialTransferFrom(
                 msg.sender,
                 recipients[i],
-                encryptedAmounts[i],
+                _toExternalHandle(encryptedAmounts[i]),
                 inputProofs[i]
             );
 
@@ -412,12 +376,15 @@ contract NoxPay is Ownable, ReentrancyGuard {
         if (recipient == address(0)) revert InvalidAddress();
         if (publicAmount == 0) revert InvalidAmount();
         if (duration == 0) revert InvalidDuration();
+        if (!confidentialToken.isOperator(msg.sender, address(this))) {
+            revert TreasuryOperatorApprovalMissing();
+        }
 
         // Transfer confidential tokens to this contract for vesting
-        confidentialToken.confidentialTransfer(
+        confidentialToken.confidentialTransferFrom(
             msg.sender,
             address(this),
-            encryptedAmount,
+            _toExternalHandle(encryptedAmount),
             inputProof
         );
 
@@ -490,9 +457,8 @@ contract NoxPay is Ownable, ReentrancyGuard {
 
         // Transfer confidential tokens to the recipient
         confidentialToken.confidentialTransfer(
-            address(this),
             msg.sender,
-            encryptedAmount,
+            _toExternalHandle(encryptedAmount),
             inputProof
         );
 
@@ -536,8 +502,8 @@ contract NoxPay is Ownable, ReentrancyGuard {
 
         viewAccessGrantCount[msg.sender] += 1;
 
-        // Grant on-chain ACL access via the confidential token
-        confidentialToken.addViewer(balanceHandle, viewer);
+        // The wrapper stores balances as Nox handles, so viewer ACL is granted via the Nox ACL directly.
+        Nox.addViewer(euint256.wrap(balanceHandle), viewer);
 
         emit ViewAccessGranted(msg.sender, viewer, grantId, expiresAt);
     }
@@ -550,17 +516,6 @@ contract NoxPay is Ownable, ReentrancyGuard {
         ViewAccess storage grant = viewAccessGrants[msg.sender][grantId];
         if (!grant.active) revert GrantNotActive();
         grant.active = false;
-
-        if (grant.balanceHandle != bytes32(0) && grant.viewer != address(0)) {
-            (bool success, ) = address(confidentialToken).call(
-                abi.encodeWithSelector(
-                    IConfidentialToken.removeViewer.selector,
-                    grant.balanceHandle,
-                    grant.viewer
-                )
-            );
-            success;
-        }
 
         emit ViewAccessRevoked(msg.sender, grantId);
     }
@@ -619,6 +574,13 @@ contract NoxPay is Ownable, ReentrancyGuard {
      * @return handle The encrypted balance handle
      */
     function getConfidentialBalance(address user) external view returns (bytes32 handle) {
-        return confidentialToken.confidentialBalanceOf(user);
+        return _toHandle(confidentialToken.confidentialBalanceOf(user));
+    }
+
+    /**
+     * @notice Whether the treasury has granted this contract operator rights on the confidential token
+     */
+    function hasTreasuryOperatorApproval() external view returns (bool) {
+        return confidentialToken.isOperator(treasury, address(this));
     }
 }

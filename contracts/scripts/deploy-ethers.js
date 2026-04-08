@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 async function main() {
-  console.log("🚀 Deploying NoxPay...");
+  console.log("🚀 Deploying NoxPay against an existing Nox wrapper...");
   
   const rpc = process.env.ARB_SEPOLIA_RPC || "https://sepolia-rollup.arbitrum.io/rpc";
   const provider = new ethers.JsonRpcProvider(rpc);
@@ -18,12 +18,21 @@ async function main() {
   console.log("Deploying with account:", wallet.address);
   console.log("Account balance:", ethers.formatEther(await provider.getBalance(wallet.address)), "ETH\n");
 
-  let CONFIDENTIAL_TOKEN_ADDRESS = process.env.NOX_CONFIDENTIAL_TOKEN_FACTORY;
-  if (!CONFIDENTIAL_TOKEN_ADDRESS || CONFIDENTIAL_TOKEN_ADDRESS === "0x...") CONFIDENTIAL_TOKEN_ADDRESS = "0x7890bf57fb99f13ef73bc4fbffb7373f28564a93";
+  let CONFIDENTIAL_TOKEN_ADDRESS =
+    process.env.CONFIDENTIAL_TOKEN_ADDRESS ||
+    process.env.VITE_CONFIDENTIAL_TOKEN_ADDRESS;
+  if (!CONFIDENTIAL_TOKEN_ADDRESS || CONFIDENTIAL_TOKEN_ADDRESS === "0x...") {
+    throw new Error("Missing CONFIDENTIAL_TOKEN_ADDRESS or VITE_CONFIDENTIAL_TOKEN_ADDRESS");
+  }
   const TREASURY_ADDRESS = process.env.TREASURY_ADDRESS || wallet.address;
 
-  console.log("Confidential Token (Mock):", CONFIDENTIAL_TOKEN_ADDRESS);
-  const UNDERLYING_TOKEN_ADDRESS = process.env.VITE_UNDERLYING_TOKEN_ADDRESS || "0x98ea123472023cb2bc815b804bb0ed7903bd8111";
+  console.log("Confidential Token:", CONFIDENTIAL_TOKEN_ADDRESS);
+  const UNDERLYING_TOKEN_ADDRESS =
+    process.env.UNDERLYING_TOKEN_ADDRESS ||
+    process.env.VITE_UNDERLYING_TOKEN_ADDRESS;
+  if (!UNDERLYING_TOKEN_ADDRESS) {
+    throw new Error("Missing UNDERLYING_TOKEN_ADDRESS or VITE_UNDERLYING_TOKEN_ADDRESS");
+  }
   console.log("Underlying Token:", UNDERLYING_TOKEN_ADDRESS);
   console.log("Treasury Address:", TREASURY_ADDRESS);
   console.log("");
@@ -53,6 +62,9 @@ async function main() {
 
   console.log("🎉 Deployment complete! Update your frontend .env with:");
   console.log(`VITE_NOXPAY_ADDRESS=${noxpayAddress}`);
+  console.log(
+    `Reminder: the treasury must call setOperator(${noxpayAddress}, <future timestamp>) on ${CONFIDENTIAL_TOKEN_ADDRESS}.`
+  );
 }
 
 main().catch(console.error);

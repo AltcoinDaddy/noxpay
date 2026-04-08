@@ -13,7 +13,7 @@ NoxPay is a confidential payroll and rewards platform built for DAOs, protocols,
 | Feature | Description |
 |---|---|
 | **Token Shielding** | Wrap any ERC-20 into its confidential ERC-7984 version |
-| **Token Unshielding** | Unwrap your confidential ERC-7984 tokens back into ERC-20 entirely from the UI |
+| **Token Unshielding** | Initiate unwrap requests from the UI; finalize the real Nox unwrap with a decryption proof |
 | **Confidential Payments** | Send rewards with encrypted amounts — only the recipient can decrypt |
 | **Batch Payments** | Distribute to multiple recipients in a single transaction |
 | **Public Aggregates** | Total distributed visible to everyone; individual amounts hidden |
@@ -79,9 +79,11 @@ noxpay/
 ├── contracts/                    # Smart contracts
 │   ├── contracts/
 │   │   ├── NoxPay.sol           # Main contract with Nox integration
-│   │   └── MockTokens.sol       # Underlying mock tokens for local testing
+│   │   ├── MockTokens.sol       # Underlying mock token for test funding
+│   │   └── WrappedConfidentialToken.sol # Real Nox ERC-20 → ERC-7984 wrapper
 │   ├── scripts/
-│   │   └── deployMockSetupEthers.js # Automated deployment scripts
+│   │   ├── deployRealSetupEthers.js # Deploy real Nox wrapper + NoxPay
+│   │   └── deployMockSetupEthers.js # Backward-compatible alias to the real deploy flow
 │   ├── hardhat.config.js        # Hardhat configuration
 │   └── .env.example             # Environment template
 │
@@ -130,9 +132,18 @@ cp .env.example .env
 ### 3. Deploy to Arbitrum Sepolia
 
 ```bash
-node scripts/deployMockSetupEthers.js
+npx hardhat compile
+node scripts/deployRealSetupEthers.js
 ```
-*This will deploy the mock USDC tokens, wrap them, and instantly install your variables into your frontend's environment file.*
+This deploys a real iExec Nox ERC-20 wrapper and then deploys `NoxPay` against it. If `UNDERLYING_TOKEN_ADDRESS` is empty, the script first deploys a `MockUSDC` test token and wraps that. The script also updates [frontend/.env.local](./frontend/.env.local) with the new addresses.
+
+Before treasury payouts or vesting transfers will work, the treasury wallet must grant `NoxPay` operator rights on the confidential token:
+
+```text
+setOperator(<noxpay-address>, <future-unix-timestamp>)
+```
+
+Call that on the deployed `WrappedConfidentialToken` contract from the treasury wallet.
 
 ### 4. Running the Frontend
 
@@ -143,6 +154,12 @@ npm run dev
 ```
 
 Visit `http://localhost:5173` in your browser.
+
+## Important Notes
+
+- Real Nox balance handles now come from the official wrapper, so recipient decryption can work correctly on Arbitrum Sepolia.
+- The unshield UI still submits the first `unwrap()` transaction only. Real wrappers require a later `finalizeUnwrap()` call with a decryption proof, so full unshield automation is still a follow-up item.
+- Selective disclosure still assumes contract-managed ACL updates. Real Nox viewer ACLs are tied to the underlying handle admin model, so that flow needs a dedicated follow-up before it is production-ready.
 
 ---
 

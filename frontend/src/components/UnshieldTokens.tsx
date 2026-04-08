@@ -60,7 +60,9 @@ export function UnshieldTokens() {
       await publicClient.waitForTransactionReceipt({ hash: unwrapHash });
 
       setStep('done');
-      toast.success(`Successfully submitted unwrap request for ${amount} ${symbol}. The protocol will finalize decryption shortly.`);
+      toast.success(
+        `Submitted unwrap request for ${amount} ${symbol}. Finalize the unwrap with the returned decryption proof before expecting the ERC-20 payout.`
+      );
       setAmount('');
     } catch (err: unknown) {
       console.error('Unwrap error:', err);
@@ -98,7 +100,8 @@ export function UnshieldTokens() {
             </h3>
             <p className="text-sm text-nox-lightgray">
               Convert your confidential ERC-7984 balance back to standard tokens. 
-              This initiates a two-step process to decrypt your amount and withdraw.
+              This only submits the first unwrap request. A real Nox wrapper still needs a later
+              finalize step with the decryption proof before the ERC-20 transfer is completed.
             </p>
           </div>
         </div>
@@ -154,7 +157,7 @@ export function UnshieldTokens() {
                 active={false}
                 completed={step === 'done'}
                 loading={false}
-                label="Unwrap submitted. Nox protocol will finalize."
+                label="Unwrap submitted. Finalization still needs a proof."
               />
             </div>
           )}
