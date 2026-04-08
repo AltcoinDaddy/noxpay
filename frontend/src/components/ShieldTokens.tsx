@@ -517,20 +517,39 @@ function formatDisplayAmount(value: bigint, decimals: number) {
   });
 }
 
-function getShieldErrorMessage(error: unknown, symbol: string) {
+function extractRawErrorMessage(error: unknown) {
   const err = error as {
     shortMessage?: string;
+    details?: string;
     message?: string;
-    cause?: { shortMessage?: string; message?: string };
+    cause?: { shortMessage?: string; details?: string; message?: string };
   };
 
-  const rawMessage =
+  return (
     err?.shortMessage ||
+    err?.details ||
     err?.cause?.shortMessage ||
+    err?.cause?.details ||
     err?.message ||
     err?.cause?.message ||
-    '';
+    ''
+  );
+}
+
+function cleanErrorMessage(message: string) {
+  return message
+    .replace(/^execution reverted:?\s*/i, '')
+    .replace(/^reverted with reason string\s*/i, '')
+    .replace(/^user rejected the request\.?\s*/i, 'User rejected the request. ')
+    .replace(/^Error:\s*/i, '')
+    .replace(/^["']|["']$/g, '')
+    .trim();
+}
+
+function getShieldErrorMessage(error: unknown, symbol: string) {
+  const rawMessage = extractRawErrorMessage(error);
   const lower = rawMessage.toLowerCase();
+  const cleaned = cleanErrorMessage(rawMessage);
 
   if (!rawMessage) {
     return 'Shielding failed. Check your wallet and try again.';
@@ -541,32 +560,34 @@ function getShieldErrorMessage(error: unknown, symbol: string) {
   if (lower.includes('insufficient') && lower.includes('fund')) {
     return 'Your wallet does not have enough ETH on Arbitrum Sepolia to pay gas.';
   }
+  if (lower.includes('erc20insufficientallowance') || lower.includes('allowance')) {
+    return `Shielding failed because the ${symbol} allowance for NoxPay is too low. Re-approve and try again.`;
+  }
+  if (lower.includes('erc20insufficientbalance') || lower.includes('transfer amount exceeds balance')) {
+    return `Your wallet does not have enough ${symbol} to shield that amount.`;
+  }
   if (lower.includes('transfer amount exceeds balance') || lower.includes('transferfrom failed')) {
     return `Your wallet does not have enough ${symbol} to shield that amount.`;
+  }
+  if (lower.includes('invalidamount')) {
+    return `Shielding failed because the ${symbol} amount was invalid.`;
+  }
+  if (lower.includes('unsupported chain')) {
+    return 'Shielding failed because this action is not supported on the current chain. Switch to Arbitrum Sepolia.';
   }
   if (lower.includes('chain mismatch') || lower.includes('chain disconnected')) {
     return 'Switch your wallet to Arbitrum Sepolia and try again.';
   }
 
-  return rawMessage.length > 160
-    ? 'Shielding failed. Check the wallet prompt or browser console for the detailed revert.'
-    : rawMessage;
+  return cleaned.length > 0 && cleaned.length <= 220
+    ? `Shielding failed: ${cleaned}`
+    : 'Shielding failed. Open the wallet prompt or browser console to inspect the full revert reason.';
 }
 
 function getMintErrorMessage(error: unknown, symbol: string) {
-  const err = error as {
-    shortMessage?: string;
-    message?: string;
-    cause?: { shortMessage?: string; message?: string };
-  };
-
-  const rawMessage =
-    err?.shortMessage ||
-    err?.cause?.shortMessage ||
-    err?.message ||
-    err?.cause?.message ||
-    '';
+  const rawMessage = extractRawErrorMessage(error);
   const lower = rawMessage.toLowerCase();
+  const cleaned = cleanErrorMessage(rawMessage);
 
   if (!rawMessage) {
     return `Minting demo ${symbol} failed.`;
@@ -581,9 +602,9 @@ function getMintErrorMessage(error: unknown, symbol: string) {
     return 'The treasury wallet does not have enough ETH on Arbitrum Sepolia to pay gas.';
   }
 
-  return rawMessage.length > 160
-    ? `Minting demo ${symbol} failed. Check the wallet prompt or browser console for the detailed revert.`
-    : rawMessage;
+  return cleaned.length > 0 && cleaned.length <= 220
+    ? `Minting demo ${symbol} failed: ${cleaned}`
+    : `Minting demo ${symbol} failed. Open the wallet prompt or browser console to inspect the full revert reason.`;
 }
 
 function shortAddress(address: string) {
