@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { formatUnits } from 'viem';
 import { useAccount, useReadContract, useReadContracts, useWalletClient, useWriteContract, usePublicClient } from 'wagmi';
+import { arbitrumSepolia } from 'wagmi/chains';
 import { CONTRACTS, NOXPAY_ABI, ZERO_ADDRESS } from '../config/contracts';
 import { useTokenMetadata } from '../hooks/useTokenMetadata';
 import { useContractConfig } from '../hooks/useContractConfig';
@@ -32,6 +33,18 @@ function isVestingScheduleResult(value: unknown): value is VestingScheduleResult
 
 function readBigIntResult(value: unknown) {
   return typeof value === 'bigint' ? value : 0n;
+}
+
+function isHexHandle(handle: string) {
+  return /^0x[0-9a-fA-F]{64}$/.test(handle);
+}
+
+function getHandleChainId(handle: string) {
+  if (!isHexHandle(handle)) {
+    return null;
+  }
+
+  return Number.parseInt(handle.slice(4, 12), 16);
 }
 
 export function RecipientDashboard() {
@@ -132,10 +145,17 @@ export function RecipientDashboard() {
     .filter((schedule): schedule is NonNullable<typeof schedule> => schedule !== null);
 
   const paymentCount = Number(paymentCountData ?? 0n).toLocaleString();
-  const hasEncryptedBalance = balanceHandle && balanceHandle !== ('0x' + '0'.repeat(64));
+  const zeroHandle = `0x${'0'.repeat(64)}`;
+  const handleChainId = typeof balanceHandle === 'string' ? getHandleChainId(balanceHandle) : null;
+  const hasEncryptedBalance = Boolean(balanceHandle && balanceHandle !== zeroHandle);
+  const hasValidEncryptedBalance = hasEncryptedBalance && handleChainId === arbitrumSepolia.id;
 
   const handleDecryptBalance = async () => {
     if (!walletClient || !balanceHandle) return;
+    if (!hasValidEncryptedBalance) {
+      toast.error('This wallet does not have a valid Arbitrum Sepolia balance handle to decrypt yet.');
+      return;
+    }
     try {
       setIsDecrypting(true);
       const handleClient = await createViemHandleClient(walletClient as any);
@@ -241,6 +261,8 @@ export function RecipientDashboard() {
                 <p className="text-sm text-nox-lightgray">
                   {decryptedBalance !== null
                     ? 'Actual balance decrypted locally.'
+                    : hasEncryptedBalance && !hasValidEncryptedBalance
+                      ? `The contract returned a non-decryptable handle for chain ${handleChainId ?? 'unknown'} instead of Arbitrum Sepolia (${arbitrumSepolia.id}).`
                     : hasEncryptedBalance
                       ? 'Encrypted balance handle loaded from the contract.'
                       : 'No encrypted balance handle found for this wallet yet.'}
@@ -251,7 +273,7 @@ export function RecipientDashboard() {
                 onClick={handleDecryptBalance}
                 disabled={isDecrypting || !hasEncryptedBalance || !walletClient}
                 className={`mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-semibold transition-all ${
-                  hasEncryptedBalance && walletClient && !isDecrypting
+                  hasValidEncryptedBalance && walletClient && !isDecrypting
                     ? 'bg-nox-cyan/20 text-nox-cyan border border-nox-cyan/40 hover:bg-nox-cyan/30 cursor-pointer'
                     : 'bg-nox-cyan/10 text-nox-cyan border border-nox-cyan/20 opacity-70 cursor-not-allowed'
                 }`}
@@ -262,6 +284,12 @@ export function RecipientDashboard() {
                   <><Unlock className="w-4 h-4" /> Decrypt Balance</>
                 )}
               </button>
+
+              {hasEncryptedBalance && !hasValidEncryptedBalance && (
+                <p className="mt-3 text-xs text-nox-lightgray">
+                  This usually means the stored handle is a placeholder or was created outside the current Arbitrum Sepolia flow, so the Nox SDK rejects it before decryption.
+                </p>
+              )}
 
               <div className="mt-4 pt-4 border-t border-nox-border/50 space-y-3">
                 <div>
