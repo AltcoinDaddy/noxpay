@@ -31,22 +31,36 @@ export function ShieldTokens() {
   const hasCorrectChain = chainId === arbitrumSepolia.id;
 
   const { writeContractAsync, isPending } = useWriteContract();
-  const { data: balanceData } = useReadContract({
+  const {
+    data: balanceData,
+    error: balanceError,
+    isLoading: isBalanceLoading,
+  } = useReadContract({
     address: CONTRACTS.UNDERLYING_TOKEN as `0x${string}`,
+    chainId: arbitrumSepolia.id,
     abi: ERC20_ABI,
     functionName: 'balanceOf',
     args: address ? [address] : undefined,
     query: { enabled: Boolean(address && hasTokenConfig) },
   });
-  const { data: allowanceData } = useReadContract({
+  const {
+    data: allowanceData,
+    error: allowanceError,
+    isLoading: isAllowanceLoading,
+  } = useReadContract({
     address: CONTRACTS.UNDERLYING_TOKEN as `0x${string}`,
+    chainId: arbitrumSepolia.id,
     abi: ERC20_ABI,
     functionName: 'allowance',
     args: address ? [address, CONTRACTS.NOXPAY as `0x${string}`] : undefined,
     query: { enabled: Boolean(address && hasContractConfig && hasTokenConfig) },
   });
-  const { data: treasuryData } = useReadContract({
+  const {
+    data: treasuryData,
+    error: treasuryError,
+  } = useReadContract({
     address: CONTRACTS.NOXPAY as `0x${string}`,
+    chainId: arbitrumSepolia.id,
     abi: NOXPAY_ABI,
     functionName: 'treasury',
     query: { enabled: hasContractConfig },
@@ -65,6 +79,7 @@ export function ShieldTokens() {
   const needsApproval = parsedAmount !== null && allowance < parsedAmount;
   const balanceLabel = formatDisplayAmount(underlyingBalance, decimals);
   const allowanceLabel = formatDisplayAmount(allowance, decimals);
+  const readError = balanceError || allowanceError || treasuryError;
 
   useEffect(() => {
     if (address) {
@@ -213,8 +228,14 @@ export function ShieldTokens() {
 
         <div className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <InfoStat label={`Wallet ${symbol} Balance`} value={`${balanceLabel} ${symbol}`} />
-            <InfoStat label="Approved For Shielding" value={`${allowanceLabel} ${symbol}`} />
+            <InfoStat
+              label={`Wallet ${symbol} Balance`}
+              value={isBalanceLoading ? 'Loading...' : `${balanceLabel} ${symbol}`}
+            />
+            <InfoStat
+              label="Approved For Shielding"
+              value={isAllowanceLoading ? 'Loading...' : `${allowanceLabel} ${symbol}`}
+            />
           </div>
 
           {hasContractConfig && (
@@ -417,6 +438,11 @@ export function ShieldTokens() {
           {address && hasCorrectChain && parsedAmount !== null && parsedAmount > underlyingBalance && (
             <p className="text-center text-sm text-nox-lightgray">
               The entered amount is larger than your available {symbol} balance.
+            </p>
+          )}
+          {address && readError && (
+            <p className="text-center text-sm text-nox-lightgray">
+              The Sepolia balance/allowance lookup failed, so the fallback `0.00` may be misleading. Refresh and make sure the deployment addresses are reachable on Arbitrum Sepolia.
             </p>
           )}
         </div>
