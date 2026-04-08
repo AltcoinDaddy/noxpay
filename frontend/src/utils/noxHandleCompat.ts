@@ -29,7 +29,8 @@ type CompatHandleClient = {
     removeItem: (key: string) => void;
   };
   config: {
-    smartContractAddress: Hex;
+    gatewayContractAddress: Hex;
+    noxComputeContractAddress: Hex;
   };
 };
 
@@ -665,7 +666,22 @@ export function hasCompatibleHandleChain(handle: string | undefined, chainId: nu
 }
 
 export async function createCompatHandleClient(walletClient: WalletClient) {
-  return createViemHandleClient(walletClient as never) as unknown as Promise<CompatHandleClient>;
+  const sdkClient = await createViemHandleClient(walletClient as never);
+  const baseClient = sdkClient as unknown as CompatHandleClient & {
+    config: {
+      smartContractAddress: Hex;
+    };
+  };
+  const chainId = await baseClient.blockchainService.getChainId();
+  const noxComputeContractAddress = resolveNoxComputeContractAddress(chainId);
+
+  return {
+    ...baseClient,
+    config: {
+      gatewayContractAddress: baseClient.config.smartContractAddress,
+      noxComputeContractAddress,
+    },
+  };
 }
 
 export async function decryptHandleCompat({
@@ -695,7 +711,7 @@ export async function decryptHandleCompat({
   }
 
   const isViewer = await handleClient.blockchainService.readContract(
-    handleClient.config.smartContractAddress,
+    handleClient.config.noxComputeContractAddress,
     IS_VIEWER_ABI,
     [handle, userAddress]
   );
@@ -709,7 +725,7 @@ export async function decryptHandleCompat({
   const storageKey = computeDecryptionMaterialStorageKey({
     userAddress,
     chainId,
-    verifyingContract: handleClient.config.smartContractAddress,
+    verifyingContract: handleClient.config.gatewayContractAddress,
   });
 
   let authorization: string;
@@ -728,7 +744,7 @@ export async function decryptHandleCompat({
     const generatedDecryptionMaterial = await generateDecryptionMaterial({
       userAddress,
       chainId,
-      smartContractAddress: handleClient.config.smartContractAddress,
+      smartContractAddress: handleClient.config.gatewayContractAddress,
       blockchainService: handleClient.blockchainService,
     });
     authorization = generatedDecryptionMaterial.authorization;
@@ -753,7 +769,7 @@ export async function decryptHandleCompat({
     const regeneratedDecryptionMaterial = await generateDecryptionMaterial({
       userAddress,
       chainId,
-      smartContractAddress: handleClient.config.smartContractAddress,
+      smartContractAddress: handleClient.config.gatewayContractAddress,
       blockchainService: handleClient.blockchainService,
     });
     authorization = regeneratedDecryptionMaterial.authorization;
@@ -826,7 +842,7 @@ export async function publicDecryptHandleCompat({
   }
 
   const isPubliclyDecryptable = await handleClient.blockchainService.readContract(
-    handleClient.config.smartContractAddress,
+    handleClient.config.noxComputeContractAddress,
     IS_PUBLICLY_DECRYPTABLE_ABI,
     [handle]
   );
@@ -853,4 +869,15 @@ export async function publicDecryptHandleCompat({
     chainId: metadata.chainId,
     attribute: metadata.attribute,
   };
+}
+
+function resolveNoxComputeContractAddress(chainId: number): Hex {
+  if (chainId === 421614) {
+    return '0xE4622fbFCd0bDd482775bBf5b3e72382C0D99208';
+  }
+  if (chainId === 31337) {
+    return '0x9bdef3F9fEc61eE7cDfE84BDE8398595c6E0b22d';
+  }
+
+  throw new Error(`Unsupported Nox compute chain: ${chainId}`);
 }
