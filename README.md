@@ -2,7 +2,23 @@
 
 ![NoxPay Banner](./screenshots/banner.png)
 
-NoxPay is a confidential payroll and rewards platform for DAOs, protocols, and Web3 teams. Treasuries can send payments on-chain while keeping individual amounts and recipient balances encrypted with iExec Nox and ERC-7984 confidential tokens. Recipients decrypt only their own balance in the client.
+NoxPay is a private payroll and rewards app built with iExec Nox Protocol. It lets users shield mock USDC into a confidential token, send private payouts, decrypt balances when authorized, and unshield back to ERC-20 tokens.
+
+The goal is to show how confidential tokens can make payments more private while still keeping the app simple for users. Treasuries can send payments on-chain while keeping individual amounts and recipient balances encrypted with iExec Nox and ERC-7984 confidential tokens. Recipients decrypt only their own balance in the client.
+
+---
+
+## Hackathon Submission
+
+NoxPay was built as a hackathon project to explore private on-chain payments using iExec Nox Protocol. The app demonstrates a simple flow where a user can:
+
+1. Mint or hold demo USDC on Arbitrum Sepolia.
+2. Shield the USDC into a confidential token.
+3. Send or receive private rewards.
+4. Decrypt their own confidential balance when authorized.
+5. Unshield the confidential token back into normal ERC-20 USDC.
+
+This shows how Web3 teams, DAOs, and protocols can use confidential tokens for payroll, grants, rewards, and private treasury operations.
 
 ---
 
