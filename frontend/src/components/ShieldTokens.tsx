@@ -60,31 +60,14 @@ export function ShieldTokens() {
     args: address ? [address, CONTRACTS.NOXPAY as `0x${string}`] : undefined,
     query: { enabled: Boolean(address && hasContractConfig && hasTokenConfig) },
   });
-  const {
-    data: treasuryData,
-    error: treasuryError,
-  } = useReadContract({
-    address: CONTRACTS.NOXPAY as `0x${string}`,
-    chainId: arbitrumSepolia.id,
-    abi: NOXPAY_ABI,
-    functionName: 'treasury',
-    query: { enabled: hasContractConfig },
-  });
-
   const underlyingBalance = balanceData ?? 0n;
   const allowance = allowanceData ?? 0n;
-  const treasury = treasuryData;
-  const isTreasury = Boolean(
-    address &&
-    treasury &&
-    address.toLowerCase() === treasury.toLowerCase()
-  );
   const parsedAmount = safeParseAmount(amount, decimals);
   const hasEnoughBalance = parsedAmount !== null && parsedAmount <= underlyingBalance;
   const needsApproval = parsedAmount !== null && allowance < parsedAmount;
   const balanceLabel = formatDisplayAmount(underlyingBalance, decimals);
   const allowanceLabel = formatDisplayAmount(allowance, decimals);
-  const readError = balanceError || allowanceError || treasuryError;
+  const readError = balanceError || allowanceError;
 
   useEffect(() => {
     if (address) {
@@ -161,10 +144,6 @@ export function ShieldTokens() {
     }
     if (!hasCorrectChain) {
       toast.error('Switch your wallet to Arbitrum Sepolia first.');
-      return;
-    }
-    if (!isTreasury) {
-      toast.error('Only the treasury wallet can mint demo funds in this setup.');
       return;
     }
     if (!faucetRecipient || !isAddress(faucetRecipient)) {
@@ -249,11 +228,11 @@ export function ShieldTokens() {
                 <div>
                   <p className="text-sm font-semibold text-white">Demo Funding</p>
                   <p className="text-xs text-nox-lightgray mt-1">
-                    The live Sepolia demo uses mock {symbol}. The treasury wallet can mint test funds here before shielding.
+                    The live Sepolia demo uses mock {symbol}. Any tester can mint demo funds here before shielding.
                   </p>
                 </div>
                 <span className="text-[11px] font-semibold text-nox-cyan bg-nox-cyan/10 border border-nox-cyan/20 px-2.5 py-1 rounded-full whitespace-nowrap">
-                  {isTreasury ? 'TREASURY CONNECTED' : 'TREASURY ONLY'}
+                  PUBLIC FAUCET
                 </span>
               </div>
 
@@ -297,7 +276,7 @@ export function ShieldTokens() {
               <button
                 type="button"
                 onClick={handleMintDemoFunds}
-                disabled={!isTreasury || !hasCorrectChain || isFunding}
+                disabled={!hasCorrectChain || isFunding}
                 className="btn-cyan w-full flex items-center justify-center gap-2 text-sm py-3"
               >
                 {isFunding ? (
@@ -309,12 +288,6 @@ export function ShieldTokens() {
                   <>Mint Demo {symbol}</>
                 )}
               </button>
-
-              {!isTreasury && treasury && (
-                <p className="text-xs text-nox-lightgray">
-                  Connect the treasury wallet {shortAddress(treasury)} to mint demo funds from the UI.
-                </p>
-              )}
             </div>
           )}
 
@@ -604,11 +577,8 @@ function getMintErrorMessage(error: unknown, symbol: string) {
   if (lower.includes('user rejected')) {
     return 'Minting was cancelled in your wallet.';
   }
-  if (lower.includes('onlyowner') || lower.includes('ownable')) {
-    return 'The connected wallet is not allowed to mint demo funds.';
-  }
   if (lower.includes('insufficient') && lower.includes('fund')) {
-    return 'The treasury wallet does not have enough ETH on Arbitrum Sepolia to pay gas.';
+    return 'Your wallet does not have enough ETH on Arbitrum Sepolia to pay gas.';
   }
 
   return cleaned.length > 0 && cleaned.length <= 220

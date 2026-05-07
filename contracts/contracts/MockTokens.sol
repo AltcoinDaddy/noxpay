@@ -10,7 +10,8 @@ contract MockUSDC is ERC20, Ownable {
         _mint(msg.sender, 1000000 * 10**6);
     }
 
-    function mint(address to, uint256 amount) public onlyOwner {
+    /// @notice Public demo faucet mint for Sepolia testing.
+    function mint(address to, uint256 amount) public {
         _mint(to, amount);
     }
     
