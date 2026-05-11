@@ -2,8 +2,11 @@ import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   ArrowUpRight,
+  BadgeCheck,
   Clock3,
   ExternalLink,
+  Gift,
+  KeyRound,
   Layers3,
   Send,
   Shield,
@@ -14,6 +17,7 @@ import { useAccount, usePublicClient } from 'wagmi';
 import {
   CONFIDENTIAL_TOKEN_ABI,
   CONTRACTS,
+  ERC20_ABI,
   NOXPAY_ABI,
   ZERO_ADDRESS,
 } from '../config/contracts';
@@ -23,7 +27,7 @@ type ActivityMode = 'treasury' | 'recipient';
 
 type ActivityItem = {
   id: string;
-  kind: 'shield' | 'reward' | 'batch' | 'unshield';
+  kind: 'faucet' | 'shield' | 'reward' | 'batch' | 'vesting' | 'claim' | 'disclosure' | 'unshield';
   title: string;
   description: string;
   timestamp: number;
@@ -46,12 +50,20 @@ function formatTimestamp(timestamp: number) {
 
 function getItemIcon(kind: ActivityItem['kind']) {
   switch (kind) {
+    case 'faucet':
+      return <Gift className="w-4 h-4 text-nox-cyan" />;
     case 'shield':
       return <Shield className="w-4 h-4 text-nox-warning" />;
     case 'reward':
       return <Send className="w-4 h-4 text-nox-gold" />;
     case 'batch':
       return <Users className="w-4 h-4 text-nox-gold" />;
+    case 'vesting':
+      return <Clock3 className="w-4 h-4 text-nox-gold" />;
+    case 'claim':
+      return <BadgeCheck className="w-4 h-4 text-nox-success" />;
+    case 'disclosure':
+      return <KeyRound className="w-4 h-4 text-nox-cyan" />;
     case 'unshield':
       return <ArrowUpRight className="w-4 h-4 text-nox-cyan" />;
   }
@@ -86,7 +98,7 @@ export function ActivityTimeline({ mode }: { mode: ActivityMode }) {
         const latestBlock = await publicClient.getBlockNumber();
         const fromBlock = latestBlock > LOOKBACK_BLOCKS ? latestBlock - LOOKBACK_BLOCKS : 0n;
 
-        const [noxPayLogs, confidentialLogs] = await Promise.all([
+        const [noxPayLogs, confidentialLogs, underlyingLogs] = await Promise.all([
           publicClient.getLogs({
             address: CONTRACTS.NOXPAY as `0x${string}`,
             fromBlock,
@@ -94,6 +106,11 @@ export function ActivityTimeline({ mode }: { mode: ActivityMode }) {
           }),
           publicClient.getLogs({
             address: CONTRACTS.CONFIDENTIAL_TOKEN as `0x${string}`,
+            fromBlock,
+            toBlock: latestBlock,
+          }),
+          publicClient.getLogs({
+            address: CONTRACTS.UNDERLYING_TOKEN as `0x${string}`,
             fromBlock,
             toBlock: latestBlock,
           }),
@@ -106,6 +123,11 @@ export function ActivityTimeline({ mode }: { mode: ActivityMode }) {
           }
         }
         for (const log of confidentialLogs) {
+          if (typeof log.blockNumber === 'bigint') {
+            blockNumbers.add(log.blockNumber);
+          }
+        }
+        for (const log of underlyingLogs) {
           if (typeof log.blockNumber === 'bigint') {
             blockNumbers.add(log.blockNumber);
           }
@@ -205,6 +227,93 @@ export function ActivityTimeline({ mode }: { mode: ActivityMode }) {
                 txHash: log.transactionHash,
               });
             }
+
+            if (decoded.eventName === 'VestingScheduleCreated') {
+              const args = decoded.args as {
+                recipient: string;
+                scheduleId: bigint;
+                totalAmount: bigint;
+                duration: bigint;
+                startTime: bigint;
+              };
+              const isTreasuryView = mode === 'treasury';
+              const isRecipientView = mode === 'recipient' && args.recipient.toLowerCase() === normalizedAddress;
+              if (!isTreasuryView && !isRecipientView) {
+                continue;
+              }
+              nextItems.push({
+                id: `${log.transactionHash}-vesting-${args.scheduleId.toString()}`,
+                kind: 'vesting',
+                title: isTreasuryView ? 'Vesting schedule created' : 'New vesting schedule received',
+                description: `${Number(formatUnits(args.totalAmount, decimals)).toLocaleString(undefined, {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })} ${symbol} over ${Math.round(Number(args.duration) / 86400)} days.`,
+                timestamp: Number(args.startTime || BigInt(fallbackTimestamp)),
+                txHash: log.transactionHash,
+              });
+            }
+
+            if (decoded.eventName === 'VestingClaimed') {
+              const args = decoded.args as {
+                recipient: string;
+                scheduleId: bigint;
+                amount: bigint;
+                timestamp: bigint;
+              };
+              if (args.recipient.toLowerCase() !== normalizedAddress) {
+                continue;
+              }
+              nextItems.push({
+                id: `${log.transactionHash}-claim-${args.scheduleId.toString()}`,
+                kind: 'claim',
+                title: 'Vested tokens claimed',
+                description: `${Number(formatUnits(args.amount, decimals)).toLocaleString(undefined, {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })} ${symbol} claimed from schedule #${args.scheduleId.toString()}.`,
+                timestamp: Number(args.timestamp || BigInt(fallbackTimestamp)),
+                txHash: log.transactionHash,
+              });
+            }
+
+            if (decoded.eventName === 'ViewAccessGranted') {
+              const args = decoded.args as {
+                granter: string;
+                viewer: string;
+                grantId: bigint;
+                expiresAt: bigint;
+              };
+              if (args.granter.toLowerCase() !== normalizedAddress) {
+                continue;
+              }
+              nextItems.push({
+                id: `${log.transactionHash}-grant-${args.grantId.toString()}`,
+                kind: 'disclosure',
+                title: 'Viewer access granted',
+                description: `Viewer ${args.viewer.slice(0, 6)}...${args.viewer.slice(-4)} can inspect this handle until ${formatTimestamp(Number(args.expiresAt))}.`,
+                timestamp: fallbackTimestamp,
+                txHash: log.transactionHash,
+              });
+            }
+
+            if (decoded.eventName === 'ViewAccessRevoked') {
+              const args = decoded.args as {
+                granter: string;
+                grantId: bigint;
+              };
+              if (args.granter.toLowerCase() !== normalizedAddress) {
+                continue;
+              }
+              nextItems.push({
+                id: `${log.transactionHash}-revoke-${args.grantId.toString()}`,
+                kind: 'disclosure',
+                title: 'Viewer access revoked',
+                description: `Grant #${args.grantId.toString()} was revoked for the current confidential balance flow.`,
+                timestamp: fallbackTimestamp,
+                txHash: log.transactionHash,
+              });
+            }
           } catch {
             continue;
           }
@@ -251,6 +360,50 @@ export function ActivityTimeline({ mode }: { mode: ActivityMode }) {
           }
         }
 
+        for (const log of underlyingLogs) {
+          try {
+            const decoded = decodeEventLog({
+              abi: ERC20_ABI,
+              data: log.data,
+              topics: log.topics,
+            });
+
+            if (decoded.eventName !== 'Transfer') {
+              continue;
+            }
+
+            const args = decoded.args as {
+              from: string;
+              to: string;
+              value: bigint;
+            };
+            if (
+              args.from !== '0x0000000000000000000000000000000000000000' ||
+              args.to.toLowerCase() !== normalizedAddress
+            ) {
+              continue;
+            }
+
+            const timestamp = typeof log.blockNumber === 'bigint'
+              ? blockTimestampMap.get(log.blockNumber) ?? 0
+              : 0;
+
+            nextItems.push({
+              id: `${log.transactionHash}-faucet`,
+              kind: 'faucet',
+              title: 'Demo funds claimed',
+              description: `${Number(formatUnits(args.value, decimals)).toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })} ${symbol} minted to this wallet from the demo faucet.`,
+              timestamp,
+              txHash: log.transactionHash,
+            });
+          } catch {
+            continue;
+          }
+        }
+
         nextItems.sort((left, right) => right.timestamp - left.timestamp);
 
         if (!cancelled) {
@@ -289,7 +442,7 @@ export function ActivityTimeline({ mode }: { mode: ActivityMode }) {
             Recent Activity
           </h2>
           <p className="text-xs text-nox-lightgray">
-            Latest on-chain actions for this {mode === 'treasury' ? 'treasury' : 'recipient'} wallet
+            Latest on-chain actions for this {mode === 'treasury' ? 'treasury' : 'recipient'} wallet, including faucet, rewards, vesting, and unshield events
           </p>
         </div>
       </div>

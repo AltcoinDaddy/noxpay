@@ -111,6 +111,13 @@ export const NOXPAY_ABI = [
     outputs: [{ name: 'hasAccess', type: 'bool' }],
   },
   {
+    name: 'hasTreasuryOperatorApproval',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+  {
     name: 'viewAccessGrantCount',
     type: 'function',
     stateMutability: 'view',
@@ -234,6 +241,45 @@ export const NOXPAY_ABI = [
       { name: 'recipientCount', type: 'uint256', indexed: false },
       { name: 'totalPublicAmount', type: 'uint256', indexed: false },
       { name: 'timestamp', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    name: 'VestingScheduleCreated',
+    type: 'event',
+    inputs: [
+      { name: 'recipient', type: 'address', indexed: true },
+      { name: 'scheduleId', type: 'uint256', indexed: false },
+      { name: 'totalAmount', type: 'uint256', indexed: false },
+      { name: 'duration', type: 'uint256', indexed: false },
+      { name: 'startTime', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    name: 'VestingClaimed',
+    type: 'event',
+    inputs: [
+      { name: 'recipient', type: 'address', indexed: true },
+      { name: 'scheduleId', type: 'uint256', indexed: false },
+      { name: 'amount', type: 'uint256', indexed: false },
+      { name: 'timestamp', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    name: 'ViewAccessGranted',
+    type: 'event',
+    inputs: [
+      { name: 'granter', type: 'address', indexed: true },
+      { name: 'viewer', type: 'address', indexed: true },
+      { name: 'grantId', type: 'uint256', indexed: false },
+      { name: 'expiresAt', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    name: 'ViewAccessRevoked',
+    type: 'event',
+    inputs: [
+      { name: 'granter', type: 'address', indexed: true },
+      { name: 'grantId', type: 'uint256', indexed: false },
     ],
   },
 ] as const;
@@ -363,5 +409,14 @@ export const ERC20_ABI = [
       { name: 'amount', type: 'uint256' },
     ],
     outputs: [],
+  },
+  {
+    name: 'Transfer',
+    type: 'event',
+    inputs: [
+      { name: 'from', type: 'address', indexed: true },
+      { name: 'to', type: 'address', indexed: true },
+      { name: 'value', type: 'uint256', indexed: false },
+    ],
   },
 ] as const;

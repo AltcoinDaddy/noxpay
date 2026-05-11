@@ -6,6 +6,7 @@ import { decodeEventLog, parseUnits, type Hex } from 'viem';
 import { CONTRACTS, CONFIDENTIAL_TOKEN_ABI, ZERO_ADDRESS } from '../config/contracts';
 import { useContractConfig } from '../hooks/useContractConfig';
 import { useTokenMetadata } from '../hooks/useTokenMetadata';
+import { RecoveryNotice } from './RecoveryNotice';
 import toast from 'react-hot-toast';
 import { createViemHandleClient } from '@iexec-nox/handle';
 
@@ -76,12 +77,64 @@ function getUnshieldErrorMessage(error: unknown) {
   return rawMessage.replace(/^error:\s*/i, '').trim();
 }
 
+function getUnshieldRecoverySteps(error: unknown, isFinalizePhase: boolean) {
+  const lower = getRawUnshieldError(error).toLowerCase();
+
+  if (lower.includes('user rejected')) {
+    return [
+      isFinalizePhase
+        ? 'Open the wallet prompt again and approve the finalize transaction.'
+        : 'Open the wallet prompt again and approve the unwrap transaction.',
+      'Keep the wallet connected on Arbitrum Sepolia until the flow completes.',
+    ];
+  }
+  if (lower.includes('timeout') || lower.includes('object not found') || lower.includes('storage error')) {
+    return [
+      'Wait a little so the Nox gateway can index the unwrap handle.',
+      'Then use the Retry Finalization button instead of starting a brand-new unwrap.',
+    ];
+  }
+  if (lower.includes('insufficient') && lower.includes('fund')) {
+    return [
+      'Add a little more Arbitrum Sepolia ETH for gas.',
+      'Retry the unfinished step after the wallet is funded.',
+    ];
+  }
+
+  return [
+    isFinalizePhase
+      ? 'Retry finalization after refreshing the page if the handle looked stale.'
+      : 'Retry the full unshield flow after refreshing the page.',
+    'Check the browser console if the same gateway or contract error appears again.',
+  ];
+}
+
+function getRawUnshieldError(error: unknown) {
+  const err = error as {
+    shortMessage?: string;
+    details?: string;
+    message?: string;
+    cause?: { shortMessage?: string; details?: string; message?: string };
+  };
+
+  return (
+    err?.shortMessage ||
+    err?.details ||
+    err?.cause?.shortMessage ||
+    err?.cause?.details ||
+    err?.message ||
+    err?.cause?.message ||
+    ''
+  );
+}
+
 export function UnshieldTokens() {
   const { address } = useAccount();
   const { data: walletClient } = useWalletClient();
   const [amount, setAmount] = useState('');
   const [step, setStep] = useState<UnshieldStep>('idle');
   const [finalizeHandle, setFinalizeHandle] = useState<Hex | null>(null);
+  const [actionError, setActionError] = useState<{ title: string; message: string; steps: string[]; tone: 'warning' | 'danger' } | null>(null);
   const contractConfig = useContractConfig();
   const publicClient = usePublicClient();
   const { decimals, symbol, hasTokenConfig } = useTokenMetadata();
@@ -134,6 +187,7 @@ export function UnshieldTokens() {
   };
 
   const handleUnshield = async () => {
+    setActionError(null);
     if (!amount || parseFloat(amount) <= 0) {
       toast.error('Enter a valid amount');
       return;
@@ -212,9 +266,21 @@ export function UnshieldTokens() {
       const message = getUnshieldErrorMessage(err);
       if (nextFinalizeHandle) {
         setStep('finalizeError');
+        setActionError({
+          title: 'Unwrap submitted, but finalization is pending',
+          message,
+          steps: getUnshieldRecoverySteps(err, true),
+          tone: 'warning',
+        });
         toast.error(`Unwrap submitted, but finalization failed. ${message}`);
       } else {
         setStep('idle');
+        setActionError({
+          title: 'Unshielding needs another try',
+          message,
+          steps: getUnshieldRecoverySteps(err, false),
+          tone: 'warning',
+        });
         toast.error(message);
       }
     }
@@ -231,7 +297,14 @@ export function UnshieldTokens() {
       toast.success('Unwrap finalization completed.');
     } catch (error) {
       console.error('Finalize unwrap error:', error);
-      toast.error(getUnshieldErrorMessage(error));
+      const message = getUnshieldErrorMessage(error);
+      setActionError({
+        title: 'Finalization still needs a retry',
+        message,
+        steps: getUnshieldRecoverySteps(error, true),
+        tone: 'warning',
+      });
+      toast.error(message);
       setStep('finalizeError');
     }
   };
@@ -369,6 +442,14 @@ export function UnshieldTokens() {
             <p className="text-center text-sm text-nox-lightgray">
               Connect your wallet to unshield tokens
             </p>
+          )}
+          {actionError && (
+            <RecoveryNotice
+              title={actionError.title}
+              message={actionError.message}
+              steps={actionError.steps}
+              tone={actionError.tone}
+            />
           )}
         </div>
       </div>

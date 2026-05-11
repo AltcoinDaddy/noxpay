@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Shield, ArrowDownUp, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import {
@@ -8,21 +8,23 @@ import {
   useReadContract,
   useWriteContract,
 } from 'wagmi';
-import { formatUnits, isAddress, parseUnits } from 'viem';
+import { formatUnits, parseUnits } from 'viem';
 import { arbitrumSepolia } from 'wagmi/chains';
 import { CONTRACTS, NOXPAY_ABI, ERC20_ABI, ZERO_ADDRESS } from '../config/contracts';
 import { useContractConfig } from '../hooks/useContractConfig';
 import { useTokenMetadata } from '../hooks/useTokenMetadata';
+import { RecoveryNotice } from './RecoveryNotice';
 import toast from 'react-hot-toast';
 
 export function ShieldTokens() {
   const { address } = useAccount();
   const chainId = useChainId();
   const [amount, setAmount] = useState('');
-  const [faucetRecipient, setFaucetRecipient] = useState('');
   const [faucetAmount, setFaucetAmount] = useState('1000');
   const [step, setStep] = useState<'idle' | 'approving' | 'shielding' | 'done'>('idle');
   const [isFunding, setIsFunding] = useState(false);
+  const [isQuickStarting, setIsQuickStarting] = useState(false);
+  const [actionError, setActionError] = useState<{ title: string; message: string; steps: string[] } | null>(null);
   const contractConfig = useContractConfig();
   const publicClient = usePublicClient();
   const { decimals, symbol, hasTokenConfig } = useTokenMetadata();
@@ -69,13 +71,8 @@ export function ShieldTokens() {
   const allowanceLabel = formatDisplayAmount(allowance, decimals);
   const readError = balanceError || allowanceError;
 
-  useEffect(() => {
-    if (address) {
-      setFaucetRecipient((currentRecipient) => currentRecipient || address);
-    }
-  }, [address]);
-
   const handleShield = async () => {
+    setActionError(null);
     if (!amount || parseFloat(amount) <= 0) {
       toast.error('Enter a valid amount');
       return;
@@ -132,47 +129,79 @@ export function ShieldTokens() {
       toast.success(`Successfully shielded ${formatDisplayAmount(amountToShield, decimals)} ${symbol}.`);
     } catch (err: unknown) {
       console.error('Shield error:', err);
-      toast.error(getShieldErrorMessage(err, symbol));
+      const message = getShieldErrorMessage(err, symbol);
+      setActionError({
+        title: 'Shielding needs another try',
+        message,
+        steps: getShieldRecoverySteps(err, symbol),
+      });
+      toast.error(message);
       setStep('idle');
     }
   };
 
-  const handleMintDemoFunds = async () => {
+  const claimDemoFunds = async (claimAmount: string, options?: { prefillShield?: boolean }) => {
+    setActionError(null);
     if (!address || !publicClient || !hasTokenConfig || !hasContractConfig) {
       toast.error('Connect your wallet and configure the demo contracts first.');
-      return;
+      return false;
     }
     if (!hasCorrectChain) {
       toast.error('Switch your wallet to Arbitrum Sepolia first.');
-      return;
+      return false;
     }
-    if (!faucetRecipient || !isAddress(faucetRecipient)) {
-      toast.error('Enter a valid recipient address for demo funding.');
-      return;
-    }
-
-    const mintAmount = safeParseAmount(faucetAmount, decimals);
+    const mintAmount = safeParseAmount(claimAmount, decimals);
     if (mintAmount === null || mintAmount <= 0n) {
       toast.error(`Enter a valid demo funding amount in ${symbol}.`);
-      return;
+      return false;
     }
 
     try {
-      setIsFunding(true);
       const hash = await writeContractAsync({
         address: CONTRACTS.UNDERLYING_TOKEN as `0x${string}`,
         abi: ERC20_ABI,
         functionName: 'mint',
-        args: [faucetRecipient as `0x${string}`, mintAmount],
+        args: [address, mintAmount],
         ...contractConfig,
       });
       await publicClient.waitForTransactionReceipt({ hash });
-      toast.success(`Minted ${formatDisplayAmount(mintAmount, decimals)} ${symbol} to ${shortAddress(faucetRecipient)}.`);
+      if (options?.prefillShield) {
+        setAmount(claimAmount);
+      }
+      toast.success(
+        options?.prefillShield
+          ? `Claimed ${formatDisplayAmount(mintAmount, decimals)} ${symbol} and prefilled the shield amount.`
+          : `Claimed ${formatDisplayAmount(mintAmount, decimals)} ${symbol} to ${shortAddress(address)}.`
+      );
+      return true;
     } catch (err) {
       console.error('Demo funding error:', err);
-      toast.error(getMintErrorMessage(err, symbol));
+      const message = getMintErrorMessage(err, symbol);
+      setActionError({
+        title: 'Demo funding needs attention',
+        message,
+        steps: getMintRecoverySteps(err, symbol),
+      });
+      toast.error(message);
+      return false;
+    }
+  };
+
+  const handleMintDemoFunds = async () => {
+    try {
+      setIsFunding(true);
+      await claimDemoFunds(faucetAmount);
     } finally {
       setIsFunding(false);
+    }
+  };
+
+  const handleQuickStartDemo = async () => {
+    try {
+      setIsQuickStarting(true);
+      await claimDemoFunds('100', { prefillShield: true });
+    } finally {
+      setIsQuickStarting(false);
     }
   };
 
@@ -224,11 +253,41 @@ export function ShieldTokens() {
 
           {hasContractConfig && (
             <div className="rounded-xl border border-nox-cyan/20 bg-nox-cyan/5 p-4 space-y-4">
+              <div className="rounded-xl border border-nox-gold/20 bg-nox-gold/5 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-white">Quick Start Demo</p>
+                    <p className="text-xs text-nox-lightgray mt-1">
+                      First time here? Claim 100 demo {symbol} and auto-fill the shield form in one step.
+                    </p>
+                  </div>
+                  <span className="text-[11px] font-semibold text-nox-gold bg-nox-gold/10 border border-nox-gold/20 px-2.5 py-1 rounded-full whitespace-nowrap">
+                    1-CLICK
+                  </span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleQuickStartDemo}
+                  disabled={!hasCorrectChain || isQuickStarting || isFunding}
+                  className="btn-gold w-full flex items-center justify-center gap-2 text-sm py-3 mt-4"
+                >
+                  {isQuickStarting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Claiming + Prefilling...
+                    </>
+                  ) : (
+                    <>Claim 100 {symbol} + Prefill Shield</>
+                  )}
+                </button>
+              </div>
+
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <p className="text-sm font-semibold text-white">Demo Funding</p>
                   <p className="text-xs text-nox-lightgray mt-1">
-                    The live Sepolia demo uses mock {symbol}. Any tester can mint demo funds here before shielding.
+                    The live Sepolia demo uses mock {symbol}. Any tester can claim demo funds to the connected wallet before shielding.
                   </p>
                 </div>
                 <span className="text-[11px] font-semibold text-nox-cyan bg-nox-cyan/10 border border-nox-cyan/20 px-2.5 py-1 rounded-full whitespace-nowrap">
@@ -237,13 +296,9 @@ export function ShieldTokens() {
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-[1.5fr_1fr] gap-3">
-                <input
-                  type="text"
-                  value={faucetRecipient}
-                  onChange={(e) => setFaucetRecipient(e.target.value)}
-                  placeholder="Recipient address"
-                  className="nox-input font-mono text-sm"
-                />
+                <div className="nox-input flex items-center text-sm font-mono text-white/90">
+                  {address ? shortAddress(address) : 'Connect wallet to claim demo funds'}
+                </div>
                 <div className="relative">
                   <input
                     type="number"
@@ -261,31 +316,35 @@ export function ShieldTokens() {
               </div>
 
               <div className="flex gap-2 flex-wrap">
-                {['100', '500', '1000', '5000'].map((val) => (
+                {['100', '500', '1000'].map((val) => (
                   <button
                     key={val}
                     type="button"
                     onClick={() => setFaucetAmount(val)}
                     className="px-3 py-1.5 rounded-lg text-xs font-medium text-nox-lightgray border border-nox-border hover:border-nox-cyan hover:text-nox-cyan transition-all cursor-pointer"
                   >
-                    Mint {Number(val).toLocaleString()}
+                    Claim {Number(val).toLocaleString()}
                   </button>
                 ))}
               </div>
 
+              <p className="text-xs text-nox-lightgray">
+                Faucet rules: self-claim only, max 1,000 {symbol} per request, 10-minute cooldown per wallet.
+              </p>
+
               <button
                 type="button"
                 onClick={handleMintDemoFunds}
-                disabled={!hasCorrectChain || isFunding}
+                disabled={!hasCorrectChain || isFunding || isQuickStarting}
                 className="btn-cyan w-full flex items-center justify-center gap-2 text-sm py-3"
               >
                 {isFunding ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    Minting Demo Funds...
+                    Claiming Demo Funds...
                   </>
                 ) : (
-                  <>Mint Demo {symbol}</>
+                  <>Claim Demo {symbol}</>
                 )}
               </button>
             </div>
@@ -438,6 +497,14 @@ export function ShieldTokens() {
               The Sepolia balance/allowance lookup failed, so the fallback `0.00` may be misleading. Refresh and make sure the deployment addresses are reachable on Arbitrum Sepolia.
             </p>
           )}
+          {actionError && (
+            <RecoveryNotice
+              title={actionError.title}
+              message={actionError.message}
+              steps={actionError.steps}
+              tone="warning"
+            />
+          )}
         </div>
       </div>
     </motion.section>
@@ -577,6 +644,15 @@ function getMintErrorMessage(error: unknown, symbol: string) {
   if (lower.includes('user rejected')) {
     return 'Minting was cancelled in your wallet.';
   }
+  if (lower.includes('faucetselfmintonly')) {
+    return 'Demo faucet claims can only be sent to the connected wallet.';
+  }
+  if (lower.includes('faucetamounttoolarge')) {
+    return `The demo faucet allows at most 1,000 ${symbol} per claim.`;
+  }
+  if (lower.includes('faucetcooldownactive')) {
+    return 'This wallet is on faucet cooldown. Wait a bit before claiming again.';
+  }
   if (lower.includes('insufficient') && lower.includes('fund')) {
     return 'Your wallet does not have enough ETH on Arbitrum Sepolia to pay gas.';
   }
@@ -584,6 +660,86 @@ function getMintErrorMessage(error: unknown, symbol: string) {
   return cleaned.length > 0 && cleaned.length <= 220
     ? `Minting demo ${symbol} failed: ${cleaned}`
     : `Minting demo ${symbol} failed. Open the wallet prompt or browser console to inspect the full revert reason.`;
+}
+
+function getShieldRecoverySteps(error: unknown, symbol: string) {
+  const lower = extractRawErrorMessage(error).toLowerCase();
+
+  if (lower.includes('user rejected')) {
+    return [
+      'Open the wallet prompt again and approve both transactions if you still want to shield.',
+      'Keep the wallet on Arbitrum Sepolia until approve and shield both finish.',
+    ];
+  }
+  if (lower.includes('rpc endpoint returned too many errors') || lower.includes('different rpc endpoint')) {
+    return [
+      'Wait a little, then retry the action once the RPC is less busy.',
+      'If the problem keeps happening, switch the wallet or app to a healthier Arbitrum Sepolia RPC.',
+    ];
+  }
+  if (lower.includes('max fee per gas less than block base fee')) {
+    return [
+      'Retry the transaction so the wallet can pick up a fresh gas estimate.',
+      'If MetaMask shows advanced gas controls, approve with a slightly higher max fee.',
+    ];
+  }
+  if (lower.includes('insufficient') && lower.includes('fund')) {
+    return [
+      'Get a little more Arbitrum Sepolia ETH for gas.',
+      `Then retry shielding your ${symbol} balance.`,
+    ];
+  }
+  if (lower.includes('allowance')) {
+    return [
+      'Approve the token spend again from the wallet.',
+      'After the approval confirms, retry shielding the same amount.',
+    ];
+  }
+  if (lower.includes('balance')) {
+    return [
+      `Lower the shield amount or claim more demo ${symbol} first.`,
+      'Use the Max button to avoid typing above the available balance.',
+    ];
+  }
+
+  return [
+    'Confirm the wallet is connected on Arbitrum Sepolia.',
+    'Retry the action and inspect the browser console if the same revert appears again.',
+  ];
+}
+
+function getMintRecoverySteps(error: unknown, symbol: string) {
+  const lower = extractRawErrorMessage(error).toLowerCase();
+
+  if (lower.includes('user rejected')) {
+    return [
+      'Open the wallet prompt again and approve the faucet claim.',
+      'Make sure the wallet stays on Arbitrum Sepolia while signing.',
+    ];
+  }
+  if (lower.includes('faucetcooldownactive')) {
+    return [
+      'Wait for the 10-minute faucet cooldown to finish.',
+      `Then claim up to 1,000 ${symbol} again from the same wallet.`,
+    ];
+  }
+  if (lower.includes('faucetamounttoolarge')) {
+    return [
+      `Reduce the faucet amount to 1,000 ${symbol} or less.`,
+      'Use one of the quick preset buttons if you want a safe amount.',
+    ];
+  }
+  if (lower.includes('insufficient') && lower.includes('fund')) {
+    return [
+      'Get a little more Arbitrum Sepolia ETH for gas.',
+      'Then retry the faucet claim.',
+    ];
+  }
+
+  return [
+    'Confirm the demo token and NoxPay addresses are configured for this deployment.',
+    'Retry the faucet action after refreshing the page if the wallet or RPC looked stale.',
+  ];
 }
 
 function shortAddress(address: string) {

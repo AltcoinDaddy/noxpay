@@ -1,18 +1,28 @@
 import { motion } from 'framer-motion';
 import {
   EyeOff, Lock, Unlock, Download, RefreshCw,
-  Clock, Info
+  Clock, Info, CheckCircle2, AlertCircle
 } from 'lucide-react';
 import { formatUnits } from 'viem';
-import { useAccount, useReadContract, useReadContracts, useWalletClient, useWriteContract, usePublicClient } from 'wagmi';
+import { useAccount, useChainId, useReadContract, useReadContracts, useWalletClient, useWriteContract, usePublicClient } from 'wagmi';
+import { arbitrumSepolia } from 'wagmi/chains';
 import { CONTRACTS, CONFIDENTIAL_TOKEN_ABI, NOXPAY_ABI, ZERO_ADDRESS, ZERO_HANDLE } from '../config/contracts';
 import { useTokenMetadata } from '../hooks/useTokenMetadata';
 import { useContractConfig } from '../hooks/useContractConfig';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { createViemHandleClient } from '@iexec-nox/handle';
 import toast from 'react-hot-toast';
 
 type VestingScheduleResult = readonly [bigint, bigint, bigint, bigint, string, boolean];
+type DecryptState =
+  | 'no_handle'
+  | 'encrypted'
+  | 'decrypting'
+  | 'indexing'
+  | 'wrong_chain'
+  | 'unauthorized'
+  | 'decrypted'
+  | 'error';
 
 function formatCurrencyAmount(value: bigint, decimals: number) {
   return Number(formatUnits(value, decimals)).toLocaleString(undefined, {
@@ -24,6 +34,10 @@ function formatCurrencyAmount(value: bigint, decimals: number) {
 function shortHandle(handle?: string) {
   if (!handle) return 'No encrypted balance yet';
   return `${handle.slice(0, 10)}...${handle.slice(-8)}`;
+}
+
+function maskPrivateAmount(shouldReveal: boolean, value: string, fallback = '••••••') {
+  return shouldReveal ? value : fallback;
 }
 
 function isVestingScheduleResult(value: unknown): value is VestingScheduleResult {
@@ -95,6 +109,80 @@ function getDecryptErrorMessage(error: unknown) {
     : 'Decrypt failed. Open the browser console for the full SDK or RPC error.';
 }
 
+function classifyDecryptState(error: unknown): Exclude<DecryptState, 'no_handle' | 'encrypted' | 'decrypting' | 'decrypted'> {
+  const rawMessage = extractRawErrorMessage(error);
+  const lower = rawMessage.toLowerCase();
+
+  if (
+    lower.includes('object not found') ||
+    lower.includes('storage error') ||
+    lower.includes('unexpected gateway response 404')
+  ) {
+    return 'indexing';
+  }
+  if (lower.includes('not allowed') || lower.includes('viewer') || lower.includes('acl')) {
+    return 'unauthorized';
+  }
+  if (lower.includes('handle chainid') || lower.includes('unsupported chain') || lower.includes('chain mismatch')) {
+    return 'wrong_chain';
+  }
+
+  return 'error';
+}
+
+function getDecryptStateMeta(state: DecryptState) {
+  switch (state) {
+    case 'no_handle':
+      return {
+        badge: 'No balance yet',
+        badgeClass: 'text-nox-lightgray border-nox-border/50 bg-nox-dark/40',
+        helper: 'This wallet does not have a confidential balance handle yet.',
+      };
+    case 'encrypted':
+      return {
+        badge: 'Encrypted',
+        badgeClass: 'text-nox-cyan border-nox-cyan/30 bg-nox-cyan/10',
+        helper: 'Your confidential balance exists on-chain and is hidden until you explicitly decrypt it.',
+      };
+    case 'decrypting':
+      return {
+        badge: 'Decrypting',
+        badgeClass: 'text-nox-gold border-nox-gold/30 bg-nox-gold/10',
+        helper: 'Waiting for wallet authorization and the Nox TEE decryption response.',
+      };
+    case 'indexing':
+      return {
+        badge: 'Gateway indexing',
+        badgeClass: 'text-nox-gold border-nox-gold/30 bg-nox-gold/10',
+        helper: 'The handle is on-chain, but the Nox gateway has not indexed it yet. Retry after a short wait.',
+      };
+    case 'wrong_chain':
+      return {
+        badge: 'Wrong chain',
+        badgeClass: 'text-amber-200 border-amber-300/30 bg-amber-300/10',
+        helper: 'Switch the wallet to Arbitrum Sepolia before trying to decrypt this handle.',
+      };
+    case 'unauthorized':
+      return {
+        badge: 'Not authorized',
+        badgeClass: 'text-rose-200 border-rose-300/30 bg-rose-300/10',
+        helper: 'This wallet is not currently allowed to decrypt the latest handle.',
+      };
+    case 'decrypted':
+      return {
+        badge: 'Decrypted',
+        badgeClass: 'text-nox-success border-nox-success/30 bg-nox-success/10',
+        helper: 'The real balance is currently visible in this browser session only.',
+      };
+    case 'error':
+      return {
+        badge: 'Decrypt failed',
+        badgeClass: 'text-rose-200 border-rose-300/30 bg-rose-300/10',
+        helper: 'The decrypt request failed for a reason other than indexing, permission, or chain mismatch.',
+      };
+  }
+}
+
 function getClaimErrorMessage(error: unknown) {
   const rawMessage = extractRawErrorMessage(error);
   const lower = rawMessage.toLowerCase();
@@ -120,6 +208,7 @@ function getClaimErrorMessage(error: unknown) {
 
 export function RecipientDashboard() {
   const { address } = useAccount();
+  const chainId = useChainId();
   const { data: walletClient } = useWalletClient();
   const publicClient = usePublicClient();
   const { decimals, symbol } = useTokenMetadata();
@@ -128,6 +217,8 @@ export function RecipientDashboard() {
   const hasConfidentialTokenConfig = CONTRACTS.CONFIDENTIAL_TOKEN !== ZERO_ADDRESS;
 
   const [decryptedBalance, setDecryptedBalance] = useState<string | null>(null);
+  const [decryptState, setDecryptState] = useState<DecryptState>('no_handle');
+  const [decryptError, setDecryptError] = useState<string | null>(null);
   const [isDecrypting, setIsDecrypting] = useState(false);
   const [claimingId, setClaimingId] = useState<number | null>(null);
   const { writeContractAsync } = useWriteContract();
@@ -218,18 +309,84 @@ export function RecipientDashboard() {
 
   const paymentCount = Number(paymentCountData ?? 0n).toLocaleString();
   const hasEncryptedBalance = Boolean(balanceHandle && balanceHandle !== ZERO_HANDLE);
+  const hasCorrectChain = chainId === arbitrumSepolia.id;
+  const decryptMeta = getDecryptStateMeta(decryptState);
+  const claimableTotalBigInt = vestingSchedules.reduce(
+    (sum, schedule) => sum + (schedule.claimableBigInt > 0n ? schedule.claimableBigInt : 0n),
+    0n
+  );
+  const claimableTotalLabel = formatCurrencyAmount(claimableTotalBigInt, decimals);
+  const activeVestingCount = vestingSchedules.filter((schedule) => schedule.active).length;
+  const hasClaimableNow = claimableTotalBigInt > 0n;
+  const shouldRevealPrivateAmounts = decryptState === 'decrypted';
+  const hiddenClaimableSummary = hasClaimableNow && !shouldRevealPrivateAmounts;
+  const claimableSummaryValue = hasClaimableNow
+    ? shouldRevealPrivateAmounts
+      ? `${claimableTotalLabel} ${symbol}`
+      : 'Private funds available'
+    : `0.00 ${symbol}`;
+
+  const nextAction = !hasEncryptedBalance
+    ? {
+        title: 'Receive or shield funds first',
+        description: `This wallet needs a confidential balance handle before it can decrypt or unshield ${symbol}.`,
+      }
+    : !hasCorrectChain
+      ? {
+          title: 'Switch to Arbitrum Sepolia',
+          description: 'The current wallet is on the wrong chain for decrypt and unshield actions.',
+        }
+      : decryptState === 'indexing'
+        ? {
+            title: 'Wait for gateway indexing',
+            description: 'Your latest handle exists on-chain, but the Nox gateway has not indexed it yet. Retry decrypt shortly.',
+          }
+        : hasClaimableNow
+          ? {
+              title: 'Claim vested balance',
+              description: shouldRevealPrivateAmounts
+                ? `${claimableTotalLabel} ${symbol} is currently claimable across your active vesting schedules.`
+                : 'You have private vested funds ready to claim. Decrypt first if you want to see the exact amount before claiming.',
+            }
+          : decryptState === 'encrypted'
+            ? {
+                title: 'Decrypt your balance',
+                description: 'Your confidential balance is ready to reveal locally once you approve the wallet signature.',
+              }
+            : {
+                title: 'Review private activity',
+                description: 'Your confidential state is loaded. You can decrypt again later or unshield funds when needed.',
+              };
+
+  useEffect(() => {
+    setDecryptedBalance(null);
+    setDecryptError(null);
+    setDecryptState(hasEncryptedBalance ? 'encrypted' : 'no_handle');
+  }, [balanceHandle, hasEncryptedBalance, address]);
 
   const handleDecryptBalance = async () => {
     if (!walletClient || !balanceHandle) return;
+    if (!hasCorrectChain) {
+      setDecryptState('wrong_chain');
+      setDecryptError('Switch your wallet to Arbitrum Sepolia before decrypting.');
+      toast.error('Switch your wallet to Arbitrum Sepolia before decrypting.');
+      return;
+    }
     try {
       setIsDecrypting(true);
+      setDecryptError(null);
+      setDecryptState('decrypting');
       const handleClient = await createViemHandleClient(walletClient as any);
       const { value } = await handleClient.decrypt(balanceHandle as `0x${string}`);
       setDecryptedBalance(formatCurrencyAmount(BigInt(value), decimals));
+      setDecryptState('decrypted');
       toast.success('Balance decrypted locally via TEE!');
     } catch (e) {
       console.error('Decryption failed:', e);
-      toast.error(getDecryptErrorMessage(e));
+      const message = getDecryptErrorMessage(e);
+      setDecryptState(classifyDecryptState(e));
+      setDecryptError(message);
+      toast.error(message);
     } finally {
       setIsDecrypting(false);
     }
@@ -309,9 +466,17 @@ export function RecipientDashboard() {
                 <span className="text-sm font-medium text-nox-lightgray">
                   Confidential Balance
                 </span>
-                <div className="privacy-badge">
-                  <Lock className="w-3 h-3" />
-                  Encrypted
+                <div className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${decryptMeta.badgeClass}`}>
+                  {decryptState === 'decrypted' ? (
+                    <CheckCircle2 className="w-3 h-3" />
+                  ) : decryptState === 'indexing' || decryptState === 'wrong_chain' || decryptState === 'unauthorized' || decryptState === 'error' ? (
+                    <AlertCircle className="w-3 h-3" />
+                  ) : decryptState === 'decrypting' ? (
+                    <RefreshCw className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <Lock className="w-3 h-3" />
+                  )}
+                  {decryptMeta.badge}
                 </div>
               </div>
 
@@ -319,36 +484,46 @@ export function RecipientDashboard() {
                 <p className="text-2xl sm:text-3xl font-bold font-mono text-nox-cyan mb-1 break-all">
                   {decryptedBalance !== null
                     ? `$${decryptedBalance} ${symbol}`
-                    : hasEncryptedBalance 
-                      ? shortHandle(balanceHandle) 
+                    : hasEncryptedBalance
+                      ? '••••••'
                       : '$0.00'}
                 </p>
                 <p className="text-sm text-nox-lightgray">
-                  {decryptedBalance !== null
-                    ? 'Actual balance decrypted locally.'
-                    : hasEncryptedBalance
-                      ? 'Encrypted balance handle loaded from the confidential token contract.'
-                      : 'No encrypted balance handle found for this wallet yet.'}
+                  {decryptMeta.helper}
                 </p>
               </div>
 
+              {decryptError && (
+                <div className="mt-3 rounded-xl border border-rose-300/20 bg-rose-300/5 px-3 py-2 text-sm text-rose-100">
+                  {decryptError}
+                </div>
+              )}
+
               <button
                 onClick={handleDecryptBalance}
-                disabled={isDecrypting || !hasEncryptedBalance || !walletClient}
+                disabled={isDecrypting || !hasEncryptedBalance || !walletClient || !hasCorrectChain}
                 className={`mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-semibold transition-all ${
-                  hasEncryptedBalance && walletClient && !isDecrypting
+                  hasEncryptedBalance && walletClient && !isDecrypting && hasCorrectChain
                     ? 'bg-nox-cyan/20 text-nox-cyan border border-nox-cyan/40 hover:bg-nox-cyan/30 cursor-pointer'
                     : 'bg-nox-cyan/10 text-nox-cyan border border-nox-cyan/20 opacity-70 cursor-not-allowed'
                 }`}
               >
                 {isDecrypting ? (
                   <><RefreshCw className="w-4 h-4 animate-spin" /> Decrypting via TEE...</>
+                ) : !hasCorrectChain ? (
+                  <><Lock className="w-4 h-4" /> Switch to Arbitrum Sepolia</>
                 ) : (
                   <><Unlock className="w-4 h-4" /> Decrypt Balance</>
                 )}
               </button>
 
               <div className="mt-4 pt-4 border-t border-nox-border/50 space-y-3">
+                <div>
+                  <p className="text-xs text-nox-lightgray">Current Handle</p>
+                  <p className="text-sm font-mono text-white truncate">
+                    {hasEncryptedBalance ? shortHandle(balanceHandle) : 'No encrypted balance yet'}
+                  </p>
+                </div>
                 <div>
                   <p className="text-xs text-nox-lightgray">Connected Wallet</p>
                   <p className="text-sm font-mono text-white truncate">
@@ -381,9 +556,13 @@ export function RecipientDashboard() {
                     <div className="flex justify-between text-sm mb-2">
                       <span className="text-nox-lightgray">Vested / Total</span>
                       <span className="font-mono">
-                        <span className="text-nox-success">{symbol} {schedule.vested}</span>
+                        <span className="text-nox-success">
+                          {symbol} {maskPrivateAmount(shouldRevealPrivateAmounts, schedule.vested)}
+                        </span>
                         <span className="text-nox-lightgray"> / </span>
-                        <span className="text-white">{symbol} {schedule.total}</span>
+                        <span className="text-white">
+                          {symbol} {maskPrivateAmount(shouldRevealPrivateAmounts, schedule.total)}
+                        </span>
                       </span>
                     </div>
 
@@ -404,7 +583,12 @@ export function RecipientDashboard() {
                     </div>
 
                     <div className="mb-3 rounded-lg border border-nox-border/40 bg-nox-dark/30 p-3 text-xs text-nox-lightgray">
-                      Claimed so far: {symbol} {schedule.claimed}
+                      Claimed so far: {symbol} {maskPrivateAmount(shouldRevealPrivateAmounts, schedule.claimed)}
+                      {!shouldRevealPrivateAmounts && (
+                        <span className="ml-2 text-nox-cyan">
+                          Decrypt to reveal exact vesting numbers in this session.
+                        </span>
+                      )}
                       {!schedule.active && <span className="ml-2 text-nox-success">Completed</span>}
                     </div>
 
@@ -437,38 +621,136 @@ export function RecipientDashboard() {
           >
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-semibold text-white">
-                Private Activity
+                Recipient Summary
               </h3>
               <button
                 type="button"
                 className="flex items-center gap-1.5 text-sm text-nox-lightgray"
                 disabled
               >
-                <RefreshCw className="w-4 h-4" />
-                Live Indexing Pending
+                <CheckCircle2 className="w-4 h-4" />
+                Session-aware view
               </button>
             </div>
 
-            <div className="p-4 rounded-xl bg-nox-cyan/5 border border-nox-cyan/10 mb-5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-5">
+              <SummaryInfoCard
+                label="Balance visibility"
+                value={decryptMeta.badge}
+                helper={decryptedBalance !== null ? `${decryptedBalance} ${symbol} visible in-memory only.` : decryptMeta.helper}
+              />
+              <SummaryInfoCard
+                label="Claimable now"
+                value={claimableSummaryValue}
+                helper={
+                  hasClaimableNow
+                    ? shouldRevealPrivateAmounts
+                      ? 'Ready to claim from active vesting schedules.'
+                      : 'A claimable private amount exists, but it stays masked until you decrypt in this session.'
+                    : 'No vested amount is claimable right now.'
+                }
+              />
+              <SummaryInfoCard
+                label="Rewards received"
+                value={paymentCount}
+                helper="Public payment counter recorded for this wallet."
+              />
+              <SummaryInfoCard
+                label="Active vesting schedules"
+                value={activeVestingCount.toString()}
+                helper={vestingSchedules.length > 0 ? `${vestingSchedules.length} schedules tracked in this view.` : 'No vesting schedules found yet.'}
+              />
+            </div>
+
+            {hiddenClaimableSummary && (
+              <div className="rounded-xl border border-nox-gold/20 bg-nox-gold/6 p-4 mb-5">
+                <p className="text-sm text-nox-gold flex items-start gap-2">
+                  <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  You have private funds available to claim. NoxPay keeps that amount masked until you click decrypt, but you can still claim directly when you are ready.
+                </p>
+              </div>
+            )}
+
+            <div className="rounded-xl border border-nox-cyan/10 bg-nox-cyan/5 p-4 mb-5">
               <p className="text-sm text-nox-cyan flex items-start gap-2">
                 <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                This panel reads your encrypted balance handle, payment count, and vesting state directly from the contract.
-                Decryption happens client-side through the Nox SDK when the handle is available through the gateway.
+                The app reads your encrypted balance handle, reward counter, and vesting state directly from chain.
+                Decryption happens client-side through the Nox SDK and is kept only in temporary browser memory.
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-nox-border/30 bg-nox-dark/30 p-5 mb-5">
+              <p className="text-sm text-white mb-2">
+                Recommended next action
+              </p>
+              <p className="text-sm font-medium text-nox-cyan mb-1">
+                {nextAction.title}
+              </p>
+              <p className="text-sm text-nox-lightgray leading-relaxed">
+                {nextAction.description}
               </p>
             </div>
 
             <div className="rounded-xl border border-nox-border/30 bg-nox-dark/30 p-5">
-              <p className="text-sm text-white mb-2">
-                Current view
+              <p className="text-sm text-white mb-3">
+                Recipient checklist
               </p>
-              <p className="text-sm text-nox-lightgray leading-relaxed">
-                Recipient counters and vesting schedules are loaded on-chain, while confidential values remain encrypted until
-                you decrypt them from your wallet session.
-              </p>
+              <div className="space-y-3">
+                <ChecklistRow
+                  ok={Boolean(address)}
+                  label="Wallet connected"
+                />
+                <ChecklistRow
+                  ok={hasCorrectChain}
+                  label="Arbitrum Sepolia selected"
+                />
+                <ChecklistRow
+                  ok={hasEncryptedBalance}
+                  label="Confidential handle available"
+                />
+                <ChecklistRow
+                  ok={decryptState === 'decrypted'}
+                  label="Balance decrypted in this session"
+                />
+                <ChecklistRow
+                  ok={hasClaimableNow}
+                  label="Claimable vested amount available"
+                />
+              </div>
             </div>
           </motion.div>
         </div>
       </div>
     </motion.section>
+  );
+}
+
+function SummaryInfoCard({
+  label,
+  value,
+  helper,
+}: {
+  label: string;
+  value: string;
+  helper: string;
+}) {
+  return (
+    <div className="rounded-xl border border-nox-border/40 bg-nox-dark/30 p-4">
+      <p className="text-xs text-nox-lightgray mb-1">{label}</p>
+      <p className="text-lg font-mono text-white">{value}</p>
+      <p className="text-xs text-nox-lightgray mt-2 leading-relaxed">{helper}</p>
+    </div>
+  );
+}
+
+function ChecklistRow({ ok, label }: { ok: boolean; label: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-sm text-nox-lightgray">{label}</span>
+      <span className={`inline-flex items-center gap-1 text-xs font-medium ${ok ? 'text-nox-cyan' : 'text-nox-warning'}`}>
+        <CheckCircle2 className="w-3.5 h-3.5" />
+        {ok ? 'Ready' : 'Pending'}
+      </span>
+    </div>
   );
 }

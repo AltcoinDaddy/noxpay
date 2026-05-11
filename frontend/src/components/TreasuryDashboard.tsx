@@ -2,9 +2,9 @@ import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Landmark, Send, Users as UsersIcon, Plus, Trash2, Loader2,
-  Clock, CalendarDays, Layers3, Sparkles, CheckCircle2
+  Clock, CalendarDays, Layers3, Sparkles, CheckCircle2, AlertCircle
 } from 'lucide-react';
-import { useAccount, useChainId, usePublicClient, useWriteContract, useWalletClient } from 'wagmi';
+import { useAccount, useChainId, usePublicClient, useReadContract, useWriteContract, useWalletClient } from 'wagmi';
 import { createViemHandleClient } from '@iexec-nox/handle';
 import { isAddress, parseUnits } from 'viem';
 import { arbitrumSepolia } from 'wagmi/chains';
@@ -15,6 +15,7 @@ import {
 } from '../config/contracts';
 import { useContractConfig } from '../hooks/useContractConfig';
 import { useTokenMetadata } from '../hooks/useTokenMetadata';
+import { RecoveryNotice } from './RecoveryNotice';
 import toast from 'react-hot-toast';
 
 interface Recipient {
@@ -42,23 +43,66 @@ export function TreasuryDashboard() {
   const [vestingAddr, setVestingAddr] = useState('');
   const [vestingAmount, setVestingAmount] = useState('');
   const [vestingDays, setVestingDays] = useState('30');
+  const [actionError, setActionError] = useState<{ title: string; message: string; steps: string[] } | null>(null);
   const contractConfig = useContractConfig();
   const publicClient = usePublicClient();
   const { decimals, symbol } = useTokenMetadata();
   const hasContractConfig = CONTRACTS.NOXPAY !== ZERO_ADDRESS;
   const hasCorrectChain = chainId === arbitrumSepolia.id;
 
+  const { data: treasuryAddress } = useReadContract({
+    address: CONTRACTS.NOXPAY as `0x${string}`,
+    abi: NOXPAY_ABI,
+    functionName: 'treasury',
+    query: { enabled: hasContractConfig },
+  });
+
+  const { data: operatorApprovalData } = useReadContract({
+    address: CONTRACTS.NOXPAY as `0x${string}`,
+    abi: NOXPAY_ABI,
+    functionName: 'hasTreasuryOperatorApproval',
+    query: { enabled: hasContractConfig && hasCorrectChain },
+  });
+
+  const isTreasuryWallet = Boolean(
+    address &&
+    treasuryAddress &&
+    address.toLowerCase() === treasuryAddress.toLowerCase()
+  );
+  const hasTreasuryOperatorApproval = Boolean(operatorApprovalData);
+  const treasuryReadyForPayouts =
+    Boolean(address) &&
+    hasCorrectChain &&
+    hasContractConfig &&
+    Boolean(walletClient) &&
+    isTreasuryWallet &&
+    hasTreasuryOperatorApproval;
+
   const { writeContractAsync: writeContractAsync, isPending } = useWriteContract();
 
   const ensureConfidentialFlowsReady = () => {
+    setActionError(null);
     if (!address || !publicClient || !hasContractConfig || !walletClient) {
       toast.error('Connect your wallet and configure the NoxPay contract first.');
+      return false;
+    }
+    if (!hasCorrectChain) {
+      toast.error('Switch your wallet to Arbitrum Sepolia first.');
+      return false;
+    }
+    if (!isTreasuryWallet) {
+      toast.error('Connect the configured treasury wallet before sending rewards or creating vesting.');
+      return false;
+    }
+    if (!hasTreasuryOperatorApproval) {
+      toast.error('Treasury setup is incomplete. Call setOperator on the confidential token first.');
       return false;
     }
     return true;
   };
 
   const handleSendSingle = async () => {
+    setActionError(null);
     if (!recipientAddr || !paymentAmount) {
       toast.error('Please fill in all fields');
       return;
@@ -104,11 +148,14 @@ export function TreasuryDashboard() {
       setPaymentAmount('');
     } catch (error) {
       console.error('Single reward error:', error);
-      toast.error('Transaction failed');
+      const details = getTreasuryErrorDetails(error, 'single', symbol);
+      setActionError(details);
+      toast.error(details.message);
     }
   };
 
   const handleSendBatch = async () => {
+    setActionError(null);
     const validRecipients = batchRecipients.filter(r => r.address && r.amount);
     if (validRecipients.length === 0) {
       toast.error('Add at least one recipient');
@@ -158,11 +205,14 @@ export function TreasuryDashboard() {
       setBatchRecipients([{ id: '1', address: '', amount: '' }]);
     } catch (error) {
       console.error('Batch reward error:', error);
-      toast.error('Batch transaction failed');
+      const details = getTreasuryErrorDetails(error, 'batch', symbol);
+      setActionError(details);
+      toast.error(details.message);
     }
   };
 
   const handleCreateVesting = async () => {
+    setActionError(null);
     if (!vestingAddr || !vestingAmount || !vestingDays) {
       toast.error('Please fill in all vesting fields');
       return;
@@ -212,7 +262,9 @@ export function TreasuryDashboard() {
       setVestingDays('30');
     } catch (error) {
       console.error('Vesting creation error:', error);
-      toast.error('Vesting creation failed');
+      const details = getTreasuryErrorDetails(error, 'vesting', symbol);
+      setActionError(details);
+      toast.error(details.message);
     }
   };
 
@@ -246,6 +298,8 @@ export function TreasuryDashboard() {
     { label: 'Arbitrum Sepolia selected', ok: hasCorrectChain },
     { label: 'NoxPay deployed', ok: hasContractConfig },
     { label: 'Wallet client ready', ok: Boolean(walletClient) },
+    { label: 'Treasury wallet connected', ok: isTreasuryWallet },
+    { label: 'Treasury operator approval', ok: hasTreasuryOperatorApproval },
   ];
   const modeSummary = mode === 'single'
     ? `${singleAmountValue.toFixed(2)} ${symbol} ready for one recipient`
@@ -315,6 +369,59 @@ export function TreasuryDashboard() {
           </div>
         </div>
       </div>
+
+      {!treasuryReadyForPayouts && (
+        <div className="rounded-2xl border border-amber-300/20 bg-amber-300/5 px-4 py-4 mb-6 max-w-3xl">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-amber-200 flex-shrink-0 mt-0.5" />
+            <div className="space-y-2 text-sm">
+              <p className="font-medium text-amber-100">
+                Treasury actions are not fully ready yet.
+              </p>
+              {!address && (
+                <p className="text-nox-lightgray">
+                  Connect the treasury wallet to prepare confidential payouts.
+                </p>
+              )}
+              {address && !hasCorrectChain && (
+                <p className="text-nox-lightgray">
+                  Switch the connected wallet to Arbitrum Sepolia.
+                </p>
+              )}
+              {address && treasuryAddress && !isTreasuryWallet && (
+                <p className="text-nox-lightgray">
+                  Connected wallet does not match the configured treasury.
+                  Expected treasury: <span className="font-mono text-white">{treasuryAddress}</span>
+                </p>
+              )}
+              {address && isTreasuryWallet && !hasTreasuryOperatorApproval && (
+                <div className="text-nox-lightgray">
+                  <p>
+                    Treasury operator approval is missing.
+                  </p>
+                  <p className="mt-1 font-mono text-white break-all">
+                    setOperator({CONTRACTS.NOXPAY}, &lt;future-unix-timestamp&gt;)
+                  </p>
+                  <p className="mt-1">
+                    Call that on the confidential token contract before sending rewards or creating vesting schedules.
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {actionError && (
+        <div className="max-w-3xl mb-6">
+          <RecoveryNotice
+            title={actionError.title}
+            message={actionError.message}
+            steps={actionError.steps}
+            tone="warning"
+          />
+        </div>
+      )}
 
       {/* Mode Tabs */}
       <div className="flex gap-2 mb-6 overflow-x-auto">
@@ -408,7 +515,7 @@ export function TreasuryDashboard() {
 
               <button
                 onClick={handleSendSingle}
-                disabled={isPending || !address || !hasContractConfig || !walletClient || !hasCorrectChain}
+                disabled={isPending || !treasuryReadyForPayouts}
                 className="btn-gold w-full flex items-center justify-center gap-2 py-3.5"
               >
                 {isPending ? (
@@ -504,7 +611,7 @@ export function TreasuryDashboard() {
 
             <button
               onClick={handleSendBatch}
-              disabled={isPending || !address || !hasContractConfig || !walletClient || !hasCorrectChain}
+              disabled={isPending || !treasuryReadyForPayouts}
               className="btn-gold w-full flex items-center justify-center gap-2 py-3.5"
             >
               {isPending ? (
@@ -639,7 +746,7 @@ export function TreasuryDashboard() {
 
               <button
                 onClick={handleCreateVesting}
-                disabled={isPending || !address || !hasContractConfig || !walletClient || !hasCorrectChain}
+                disabled={isPending || !treasuryReadyForPayouts}
                 className="btn-gold w-full flex items-center justify-center gap-2 py-3.5"
               >
                 {isPending ? (
@@ -672,4 +779,122 @@ function TabButton({ active, onClick, icon, label }: {
       {label}
     </button>
   );
+}
+
+function getTreasuryErrorDetails(error: unknown, mode: 'single' | 'batch' | 'vesting', symbol: string) {
+  const rawMessage = extractTreasuryRawError(error);
+  const lower = rawMessage.toLowerCase();
+  const modeLabel = mode === 'single' ? 'reward' : mode === 'batch' ? 'batch payout' : 'vesting setup';
+
+  if (!rawMessage) {
+    return {
+      title: `${capitalizeMode(mode)} needs another try`,
+      message: `The ${modeLabel} did not complete. Check the wallet prompt and try again.`,
+      steps: [
+        'Keep the wallet connected on Arbitrum Sepolia.',
+        'Retry the action after confirming the treasury is still ready.',
+      ],
+    };
+  }
+  if (lower.includes('user rejected')) {
+    return {
+      title: `${capitalizeMode(mode)} was cancelled`,
+      message: `The ${modeLabel} was cancelled in the wallet before it could be submitted.`,
+      steps: [
+        'Open the wallet prompt again and approve the transaction if you still want to continue.',
+        'Do not switch chain or account until the transaction is fully signed.',
+      ],
+    };
+  }
+  if (lower.includes('insufficient') && lower.includes('fund')) {
+    return {
+      title: 'Treasury wallet needs gas',
+      message: 'The treasury wallet does not have enough Arbitrum Sepolia ETH to pay gas.',
+      steps: [
+        'Fund the treasury wallet with Sepolia ETH.',
+        `Then retry the ${modeLabel} for the same ${symbol} amount.`,
+      ],
+    };
+  }
+  if (lower.includes('max fee per gas less than block base fee')) {
+    return {
+      title: 'Gas estimate went stale',
+      message: `The ${modeLabel} failed because the wallet used an outdated gas estimate.`,
+      steps: [
+        'Retry the transaction so the wallet can fetch a fresh gas estimate.',
+        'If your wallet exposes gas controls, approve with a slightly higher max fee.',
+      ],
+    };
+  }
+  if (lower.includes('rpc endpoint returned too many errors') || lower.includes('different rpc endpoint')) {
+    return {
+      title: 'RPC endpoint is overloaded',
+      message: `The ${modeLabel} could not get a healthy response from the current Arbitrum Sepolia RPC.`,
+      steps: [
+        'Wait a little and retry once the network is calmer.',
+        'If it keeps failing, switch the wallet or app to a healthier Arbitrum Sepolia RPC.',
+      ],
+    };
+  }
+  if (lower.includes('operator') || lower.includes('not approved')) {
+    return {
+      title: 'Treasury operator setup is missing',
+      message: `The ${modeLabel} cannot move confidential funds until operator approval is active.`,
+      steps: [
+        `Call setOperator(${CONTRACTS.NOXPAY}, <future-unix-timestamp>) on the confidential token contract.`,
+        'Then come back and retry the treasury action.',
+      ],
+    };
+  }
+
+  const cleaned = cleanTreasuryErrorMessage(rawMessage);
+  return {
+    title: `${capitalizeMode(mode)} needs another try`,
+    message: cleaned.length > 0 && cleaned.length <= 220
+      ? cleaned
+      : `The ${modeLabel} failed. Open the browser console for the full revert reason.`,
+    steps: [
+      'Confirm the treasury wallet, chain, and operator approval are still correct.',
+      'Retry once, then inspect the browser console if the same contract error returns.',
+    ],
+  };
+}
+
+function extractTreasuryRawError(error: unknown) {
+  const err = error as {
+    shortMessage?: string;
+    details?: string;
+    message?: string;
+    cause?: { shortMessage?: string; details?: string; message?: string };
+  };
+
+  return (
+    err?.shortMessage ||
+    err?.details ||
+    err?.cause?.shortMessage ||
+    err?.cause?.details ||
+    err?.message ||
+    err?.cause?.message ||
+    ''
+  );
+}
+
+function cleanTreasuryErrorMessage(message: string) {
+  return message
+    .replace(/^execution reverted:?\s*/i, '')
+    .replace(/^reverted with reason string\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .replace(/^["']|["']$/g, '')
+    .trim();
+}
+
+function capitalizeMode(mode: 'single' | 'batch' | 'vesting') {
+  switch (mode) {
+    case 'single':
+      return 'Reward';
+    case 'batch':
+      return 'Batch payout';
+    case 'vesting':
+      return 'Vesting setup';
+  }
 }
